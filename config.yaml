@@ -1,0 +1,56 @@
+data:
+  max_entries: null                        # debug knob: truncate dataset/{mode}/{ds}/{type}/aug.json to first N entries. null = use all.
+
+prep_dataset:
+  retrieve:
+    sample_size: 300
+    retrieve_size: 5
+  split:
+    silo_size: 6
+    random_seed: 42
+    alpha: 0.1
+    split_type: 'dense'
+    split_model: 'all-MiniLM-L6-v2'
+    split_model_path: '/data1/liangzhilin/model/all-MiniLM-L6-v2'
+  augment:
+    max_new_tokens: 512
+    temperature: 0.7
+    top_k: 20
+
+
+train:
+  lora_rank: 2
+  lora_alpha: 32
+  target_modules: ['down_proj', 'gate_proj', 'up_proj']
+  lr: 3e-4
+  lora_epoch: 3
+  batch_size: 1
+  save_dir: '/data1/liangzhilin/fedhop'
+  training_output_dir: '/data1/liangzhilin/fedhop/training_output'
+
+retrieval:
+  # Absolute threshold on marginal coverage gain (cosine-sum over T_q query tokens)
+  # for the coverage-greedy server selection. If the next pick's gain < this, stop
+  # (always keeps ≥1 doc). null = off (always pick k docs).
+  coverage_min_gain: null
+
+cla:
+  d_a: 64                                  # cross-attention internal dim (per-layer projections)
+  alpha: 0.1                               # scalar multiplier on the cross-attn residual: y = base + alpha * cross_attn_out. Tune per deployment; see docs/EXPERIMENT_LOG.md.
+  L_cla: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  colbert_path: '/data1/liangzhilin/model/colbertv2.0'
+  R_cache_dir: '/data1/liangzhilin/fedhop/cla/R_cache'
+  R_max_doc_len: 256
+  R_max_query_len: 32
+  train:
+    num_epochs: 9
+    lr: 1.0e-4
+    weight_decay: 0.01
+    grad_accum_steps: 8
+    log_every: 10
+    val_every: 50
+    val_ratio: 0.1
+    k_per_combo: 500                       # questions per (dataset, type); 6 combos * 500 = 3000 samples
+    seed: 42
+    dtype: 'bf16'
+    save_path: '/data1/liangzhilin/fedhop/cla/v6/cla.pt'
