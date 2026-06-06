@@ -1,13 +1,13 @@
-"""Server-side CLA pre-training stage.
+"""Server-side CAA pre-training stage.
 
 Orchestrates the full pre-training pipeline over the combined train pool:
   offline:  per-doc LoRAs across all (dataset, type) combos (parallel-friendly)
-  cla:      train the CLA module on combined-pool samples (single-process)
-  all:      offline -> cla
+  caa:      train the CAA module on combined-pool samples (single-process)
+  all:      offline -> caa
 
 Outputs land under config['train']['save_dir']:
   doc-LoRAs at  {save_dir}/{ds}/{type}/{model}/train/le={le}/doc_lora/{doc_id}
-  CLA ckpt at   config['cla']['train']['save_path']
+  CAA ckpt at   config['caa']['train']['save_path']
 
 Consumed downstream by test_stage at deployment time.
 """
@@ -19,27 +19,27 @@ from src.dataset import load_aug_entries, iter_docs, make_doc_id
 
 
 def train_stage(root_dir, datasets, model_name, augment_model, config, gold_only=False, worker_id=0, num_workers=1, stage='all', ranks_per_gpu=1):
-    """Run server CLA pre-training over the combined train pool.
+    """Run server CAA pre-training over the combined train pool.
 
     Args:
         datasets:        list of (dataset_name, dataset_type) tuples to combine.
         gold_only:       if True, only train LoRAs for passages labeled 'gold' (debug).
         worker_id / num_workers: round-robin shard across parallel processes (offline only).
-        stage:           'offline' | 'cla' | 'all'.
-        ranks_per_gpu:   for CLA DDP; passed through to cla_train. Ignored in offline.
+        stage:           'offline' | 'caa' | 'all'.
+        ranks_per_gpu:   for CAA DDP; passed through to caa_train. Ignored in offline.
     """
     assert datasets, 'datasets must be non-empty'
-    assert stage in ('all', 'offline', 'cla'), f'train_stage: stage must be in {{all, offline, cla}}, got {stage}'
+    assert stage in ('all', 'offline', 'caa'), f'train_stage: stage must be in {{all, offline, caa}}, got {stage}'
 
     if stage in ('all', 'offline'):
         _train_doc_loras(root_dir, datasets, model_name, augment_model, config, gold_only, worker_id, num_workers)
 
-    if stage in ('all', 'cla'):
-        # Under DDP we let cla_train run on every rank; otherwise gate to worker 0 only.
+    if stage in ('all', 'caa'):
+        # Under DDP we let caa_train run on every rank; otherwise gate to worker 0 only.
         if 'LOCAL_RANK' not in os.environ and num_workers > 1 and worker_id != 0:
-            print(f'[w{worker_id}/{num_workers}] CLA sub-stage is single-process; only w0 runs it. exiting.')
+            print(f'[w{worker_id}/{num_workers}] CAA sub-stage is single-process; only w0 runs it. exiting.')
             return
-        _train_cla_module(datasets, model_name, augment_model, config, ranks_per_gpu=ranks_per_gpu)
+        _train_caa_module(datasets, model_name, augment_model, config, ranks_per_gpu=ranks_per_gpu)
 
 
 # ------------------------------------------------------------------------------
@@ -82,21 +82,21 @@ def _train_doc_loras(root_dir, datasets, model_name, augment_model, config, gold
 
 
 # ------------------------------------------------------------------------------
-# Sub-stage B: CLA module training (single-process)
+# Sub-stage B: CAA module training (single-process)
 # ------------------------------------------------------------------------------
 
-def _train_cla_module(datasets, model_name, augment_model, config, ranks_per_gpu=1):
-    """Train CLAModule on samples from `datasets` (assumes doc-LoRAs exist on disk).
+def _train_caa_module(datasets, model_name, augment_model, config, ranks_per_gpu=1):
+    """Train CAAModule on samples from `datasets` (assumes doc-LoRAs exist on disk).
 
-    Reads CLA training hyperparams from config['cla']['train']. Passes ranks_per_gpu
-    through so cla_train can bind each DDP rank to the correct GPU.
+    Reads CAA training hyperparams from config['caa']['train']. Passes ranks_per_gpu
+    through so caa_train can bind each DDP rank to the correct GPU.
     """
     import torch
-    from src.cla_train import cla_train
-    tc = config['cla']['train']
+    from src.caa_train import caa_train
+    tc = config['caa']['train']
     dtype_str = tc.get('dtype', 'bf16').lower()
     dtype = {'bf16': torch.bfloat16, 'fp16': torch.float16, 'fp32': torch.float32}.get(dtype_str, torch.bfloat16)
-    cla_train(datasets, model_name, augment_model, config, num_epochs=tc['num_epochs'], lr=float(tc['lr']),
+    caa_train(datasets, model_name, augment_model, config, num_epochs=tc['num_epochs'], lr=float(tc['lr']),
                 grad_accum_steps=tc['grad_accum_steps'], weight_decay=tc.get('weight_decay', 0.01), log_every=tc.get('log_every', 10),
                 val_every=tc.get('val_every', 50), val_ratio=tc.get('val_ratio', 0.1), k_per_combo=tc.get('k_per_combo', 50),
                 seed=tc.get('seed', 42), save_path=tc.get('save_path'), dtype=dtype, ranks_per_gpu=ranks_per_gpu)

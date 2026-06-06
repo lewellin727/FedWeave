@@ -1,4 +1,4 @@
-"""Cross-LoRA Attention (CLA).
+"""Cross-Adapter Attention (CAA).
 
 Per-layer wrapper of LlamaMLP that fuses N per-doc LoRAs through a learned
 cross-attention + token-level router.
@@ -15,8 +15,8 @@ per-doc ColBERT MaxSim totals. Both come from one ColBERT pass over query+docs.
   output  = base_mlp(x) + router(H_tilde, lora_gate, lora_down)
 
 Modules:
-  - CLAModule:    cross-attn + router projections; alpha scalar (frozen, from config).
-  - CLAMLP:       per-layer wrapper of base LlamaMLP.
+  - CAAModule:    cross-attn + router projections; alpha scalar (frozen, from config).
+  - CAAMLP:       per-layer wrapper of base LlamaMLP.
   - MountedLoRAs: context manager attaching N doc-LoRAs + R + scores to the module.
 """
 import math
@@ -29,31 +29,31 @@ from src.lora import load_doc_lora_on_device
 
 
 # ============================================================================
-# CLAModule: trainable params + runtime context
+# CAAModule: trainable params + runtime context
 # ============================================================================
 
-class CLAModule(nn.Module):
-    """Container for CLA trainable parameters + runtime context.
+class CAAModule(nn.Module):
+    """Container for CAA trainable parameters + runtime context.
 
     Args:
         hidden_size: base LLM's hidden dim (d). 2048 for llama-3.2-1b.
         intermediate_size: base LLM's MLP intermediate dim (d_m). 8192 for llama-3.2-1b.
-        L_cla: list of layer indices to mount CLA on.
+        L_caa: list of layer indices to mount CAA on.
         d_a: per-layer cross-attention internal dim. 64 by default.
         alpha: scalar multiplier on the cross-attn residual contribution.
                Tuned per-deployment; see docs/EXPERIMENT_LOG.md.
     """
 
-    def __init__(self, hidden_size, intermediate_size, L_cla, d_a=64, alpha=0.1):
+    def __init__(self, hidden_size, intermediate_size, L_caa, d_a=64, alpha=0.1):
         super().__init__()
         self.d = hidden_size
         self.d_m = intermediate_size
         self.d_a = d_a
-        self.L_cla = sorted(set(L_cla))
+        self.L_caa = sorted(set(L_caa))
         self.alpha = float(alpha)
 
         self.layer_params = nn.ModuleDict()
-        for l in self.L_cla:
+        for l in self.L_caa:
             self.layer_params[str(l)] = nn.ModuleDict({
                 'W_Q_cross': nn.Linear(self.d_m, self.d_a, bias=False),
                 'W_K_cross': nn.Linear(self.d_m, self.d_a, bias=False),
@@ -84,48 +84,48 @@ class CLAModule(nn.Module):
 
 
 # ============================================================================
-# CLAMLP: per-layer wrapper of base LlamaMLP
+# CAAMLP: per-layer wrapper of base LlamaMLP
 # ============================================================================
 
-class CLAMLP(nn.Module):
+class CAAMLP(nn.Module):
     """Wraps a single base LlamaMLP at `layer_idx`.
 
-    Falls through to the base MLP when the CLAModule has no context.
+    Falls through to the base MLP when the CAAModule has no context.
     """
 
-    def __init__(self, base_mlp, layer_idx, cla_module):
+    def __init__(self, base_mlp, layer_idx, caa_module):
         super().__init__()
         self.base_mlp = base_mlp
         self.layer_idx = layer_idx
-        self.cla_module = cla_module
+        self.caa_module = caa_module
 
     def forward(self, x):
-        if not self.cla_module.has_context:
+        if not self.caa_module.has_context:
             return self.base_mlp(x)
 
-        N = len(self.cla_module._loras)
+        N = len(self.caa_module._loras)
         if N == 0:
             return self.base_mlp(x)
 
         loras = []
         for n in range(N):
-            adapter = self.cla_module._loras[n]
+            adapter = self.caa_module._loras[n]
             l_data = adapter['by_layer'].get(self.layer_idx)
             if l_data is None or any(p not in l_data for p in ('gate', 'up', 'down')):
                 raise ValueError(f'adapter {n} missing layer {self.layer_idx} weights for gate/up/down')
             loras.append({'gate': l_data['gate'], 'up': l_data['up'], 'down': l_data['down'], 'scaling': adapter['scaling']})
 
-        R = self.cla_module._R
-        params = self.cla_module.layer_params[str(self.layer_idx)]
-        d_a = self.cla_module.d_a
-        alpha = self.cla_module.alpha
+        R = self.caa_module._R
+        params = self.caa_module.layer_params[str(self.layer_idx)]
+        d_a = self.caa_module.d_a
+        alpha = self.caa_module.alpha
 
         # Ablation toggles (env-var, read each forward call so they can be set after model load)
         import os as _os
-        NO_CROSS  = _os.environ.get('CLA_NO_CROSS',  '0') == '1'
-        NO_ROUTER = _os.environ.get('CLA_NO_ROUTER', '0') == '1'
-        NO_R      = _os.environ.get('CLA_NO_R',      '0') == '1'
-        NO_C      = _os.environ.get('CLA_NO_C',      '0') == '1'
+        NO_CROSS  = _os.environ.get('CAA_NO_CROSS',  '0') == '1'
+        NO_ROUTER = _os.environ.get('CAA_NO_ROUTER', '0') == '1'
+        NO_R      = _os.environ.get('CAA_NO_R',      '0') == '1'
+        NO_C      = _os.environ.get('CAA_NO_C',      '0') == '1'
 
         # === Base SwiGLU components ===
         base_gate = self.base_mlp.gate_proj(x)
@@ -142,7 +142,7 @@ class CLAMLP(nn.Module):
 
         H1_fp32 = H1.float()
 
-        # === Step 2-3: Cross-LoRA Attention + residual ===
+        # === Step 2-3: Cross-Adapter Attention + residual ===
         if NO_CROSS:
             H_tilde = H1
         else:
@@ -167,7 +167,7 @@ class CLAMLP(nn.Module):
             k_router_fp32 = params['W_K_route'](H1_fp32)
             alpha_logits = (q_router_fp32.unsqueeze(-2) * k_router_fp32).sum(-1) / math.sqrt(d_a)
             if not NO_C:
-                log_prior = F.log_softmax(self.cla_module._scores.float().to(alpha_logits.device), dim=-1)
+                log_prior = F.log_softmax(self.caa_module._scores.float().to(alpha_logits.device), dim=-1)
                 alpha_logits = alpha_logits + log_prior.view(1, 1, -1).to(alpha_logits.dtype)
             router_alpha = F.softmax(alpha_logits, dim=-1).to(H1.dtype)
 
@@ -200,39 +200,39 @@ class CLAMLP(nn.Module):
 # Mount / unmount / context manager
 # ============================================================================
 
-def mount_cla(model, cla_module, L_cla):
-    """Replace each LlamaMLP at layers in L_cla with a CLAMLP wrapper."""
+def mount_caa(model, caa_module, L_caa):
+    """Replace each LlamaMLP at layers in L_caa with a CAAMLP wrapper."""
     layers_path = model.model.layers if hasattr(model, 'model') else model.layers
-    for l in sorted(set(L_cla)):
-        if isinstance(layers_path[l].mlp, CLAMLP):
+    for l in sorted(set(L_caa)):
+        if isinstance(layers_path[l].mlp, CAAMLP):
             continue
         original_mlp = layers_path[l].mlp
-        layers_path[l].mlp = CLAMLP(original_mlp, l, cla_module)
-    print(f'CLA mounted on layers {sorted(set(L_cla))}')
+        layers_path[l].mlp = CAAMLP(original_mlp, l, caa_module)
+    print(f'CAA mounted on layers {sorted(set(L_caa))}')
 
 
-def unmount_cla(model):
-    """Restore each LlamaMLP that was replaced by CLAMLP."""
+def unmount_caa(model):
+    """Restore each LlamaMLP that was replaced by CAAMLP."""
     layers_path = model.model.layers if hasattr(model, 'model') else model.layers
     for l in range(len(layers_path)):
         mod = layers_path[l].mlp
-        if isinstance(mod, CLAMLP):
+        if isinstance(mod, CAAMLP):
             layers_path[l].mlp = mod.base_mlp
 
 
 class MountedLoRAs:
-    """Context manager: attach N doc-LoRAs + R + scores to a CLA-mounted model.
+    """Context manager: attach N doc-LoRAs + R + scores to a CAA-mounted model.
 
     Usage:
-        with MountedLoRAs(cla_module, lora_paths, R, scores, device='cuda', dtype=torch.bfloat16):
+        with MountedLoRAs(caa_module, lora_paths, R, scores, device='cuda', dtype=torch.bfloat16):
             output = model(input_ids)
 
     R:      (N, N) float tensor — query-conditioned doc-doc complementarity.
     scores: (N,) float tensor   — per-doc ColBERT query relevance.
     """
 
-    def __init__(self, cla_module, lora_paths, R, scores, device='cuda', dtype=torch.bfloat16):
-        self.cla_module = cla_module
+    def __init__(self, caa_module, lora_paths, R, scores, device='cuda', dtype=torch.bfloat16):
+        self.caa_module = caa_module
         self.lora_paths = list(lora_paths)
         self.R = R
         self.scores = scores
@@ -247,8 +247,8 @@ class MountedLoRAs:
         assert s_t.shape == (N,), f'scores shape {tuple(s_t.shape)} != ({N},)'
         R_t = R_t.to(self.device); s_t = s_t.to(self.device)
         loras = [load_doc_lora_on_device(path, self.device, self.dtype) for path in self.lora_paths]
-        self.cla_module.set_context(loras, R_t, s_t)
+        self.caa_module.set_context(loras, R_t, s_t)
         return self
 
     def __exit__(self, *args):
-        self.cla_module.clear_context()
+        self.caa_module.clear_context()

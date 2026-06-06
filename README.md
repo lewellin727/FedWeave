@@ -16,9 +16,6 @@ single signal: **evidence coverage**.
   complementarity prior, lets adapters exchange information, then aggregates
   them into the frozen backbone LLM.
 
-> Code uses the legacy name `CLA` (Cross-LoRA Attention) for what the paper
-> calls `CAA`. Same module.
-
 ## Setup
 
 ```bash
@@ -38,20 +35,20 @@ python main.py --mode test --stage offline \
     --datasets hotpotqa:bridge --num_silos 6
 
 # Offline 2: train the CAA module at the coordinator
-python main.py --mode train --stage cla \
+python main.py --mode train --stage caa \
     --datasets hotpotqa:bridge,hotpotqa:comparison,2wikimultihopqa:comparison \
-    --cla_save_path /path/to/cla.pt
+    --caa_save_path /path/to/caa.pt
 
 # Online: federated retrieval + collaborative generation
 python main.py --mode test --stage all \
     --datasets 2wikimultihopqa:comparison \
     --num_silos 6 --k 5 \
-    --cla_save_path /path/to/cla.pt --cla_alpha 0.05
+    --caa_save_path /path/to/caa.pt --caa_alpha 0.05
 ```
 
 Useful flags: `--silo_k` (per-silo top-k, defaults to `--k`),
 `--coverage_min_gain` (greedy early-stop threshold τ),
-`--cla_eval_tag` (eval subdir).
+`--caa_eval_tag` (eval subdir).
 
 ## Datasets
 
@@ -68,7 +65,7 @@ The `src/` files map to the paper as follows:
 |---|---|
 | §III workflow (Algorithm 1) | [main.py](main.py), [src/test_stage.py](src/test_stage.py), [src/train_stage.py](src/train_stage.py) |
 | §IV Coverage-aware retrieval | [src/r_matrix.py](src/r_matrix.py) (coverage vector, Eq. 3) · [src/silo.py](src/silo.py) (local search + greedy selection, Eq. 5) |
-| §V Cross-adapter generation | [src/cla.py](src/cla.py) (CAA, Eq. 6–13 + Alg. 2) · [src/cla_train.py](src/cla_train.py) (training, Eq. 14) · [src/inference.py](src/inference.py) (online generation) |
+| §V Cross-adapter generation | [src/caa.py](src/caa.py) (CAA, Eq. 6–13 + Alg. 2) · [src/caa_train.py](src/caa_train.py) (training, Eq. 14) · [src/inference.py](src/inference.py) (online generation) |
 | Doc-LoRA training (Eq. 1) | [src/lora.py](src/lora.py), [src/train_stage.py](src/train_stage.py) |
 | Data + prompts | [src/dataset.py](src/dataset.py), [src/utils.py](src/utils.py) |
 

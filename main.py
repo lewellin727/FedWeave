@@ -3,14 +3,14 @@
 Thin CLI dispatcher. Each --mode delegates the full pipeline to its stage file.
 
   --mode train  -> src/train_stage.py
-                   Server-side CLA pre-training over the combined train pool.
-                   Sub-stages: offline (doc-LoRAs, parallel) | cla (CLA module)
-                   | all (offline -> cla).
+                   Server-side CAA pre-training over the combined train pool.
+                   Sub-stages: offline (doc-LoRAs, parallel) | caa (CAA module)
+                   | all (offline -> caa).
 
   --mode test   -> src/test_stage.py
                    Federated multi-silo deployment on one (dataset, type) pair.
                    Sub-stages: offline (per-silo doc-LoRAs) | online (federated
-                   retrieval + CLA-aggregated generation) | aggregate | all.
+                   retrieval + CAA-aggregated generation) | aggregate | all.
 
 Dataset selection:
   --datasets X:Y[,X:Y...]    Comma-separated dataset:type pairs.
@@ -38,10 +38,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--mode", type=str, required=True, choices=['train', 'test'])
-    parser.add_argument("--stage", type=str, default='all', choices=['all', 'offline', 'online', 'aggregate', 'cla'],
+    parser.add_argument("--stage", type=str, default='all', choices=['all', 'offline', 'online', 'aggregate', 'caa'],
                         help='Sub-stage selection. '
-                             'Train mode: "offline" trains doc-LoRAs (parallel); "cla" trains CLA module '
-                             '(single-process, requires LoRAs to exist); "all" runs offline -> cla. '
+                             'Train mode: "offline" trains doc-LoRAs (parallel); "caa" trains CAA module '
+                             '(single-process, requires LoRAs to exist); "all" runs offline -> caa. '
                              'Test mode: "all" runs offline -> online (and aggregate if num_workers=1); '
                              '"aggregate" only merges shards.')
     parser.add_argument("--datasets", type=str, required=True,
@@ -59,14 +59,14 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--max_entries", type=int, default=None,
                         help='Override config.data.max_entries: cap entries per (dataset, type) to first N.')
-    parser.add_argument("--cla_alpha", type=float, help='Override cla.alpha from config: scalar multiplier on the cross-attn residual.')
-    parser.add_argument("--cla_k_per_combo", type=int, help='Override cla.train.k_per_combo from config (training only).')
-    parser.add_argument("--cla_num_epochs", type=int, help='Override cla.train.num_epochs from config (training only).')
-    parser.add_argument("--cla_save_path", type=str, help='Override cla.train.save_path from config (train: where to save; test: which ckpt to load).')
-    parser.add_argument("--cla_eval_tag", type=str, default=None, help='Test mode: override the cla_subdir under test/le=.../ so each run writes to its own eval dir.')
+    parser.add_argument("--caa_alpha", type=float, help='Override caa.alpha from config: scalar multiplier on the cross-attn residual.')
+    parser.add_argument("--caa_k_per_combo", type=int, help='Override caa.train.k_per_combo from config (training only).')
+    parser.add_argument("--caa_num_epochs", type=int, help='Override caa.train.num_epochs from config (training only).')
+    parser.add_argument("--caa_save_path", type=str, help='Override caa.train.save_path from config (train: where to save; test: which ckpt to load).')
+    parser.add_argument("--caa_eval_tag", type=str, default=None, help='Test mode: override the caa_subdir under test/le=.../ so each run writes to its own eval dir.')
     parser.add_argument("--coverage_min_gain", type=float, default=None, help='Test mode: early-stop threshold on marginal coverage gain (cosine-sum over T_q query tokens). Overrides retrieval.coverage_min_gain. Always keeps ≥1 doc.')
     parser.add_argument("--ranks_per_gpu", type=int, default=1,
-                        help='CLA DDP: with torchrun --nproc_per_node=N and CUDA_VISIBLE_DEVICES set to M GPUs, ranks 0..N-1 map to visible GPU idx = LOCAL_RANK // ranks_per_gpu (so N = M * ranks_per_gpu).')
+                        help='CAA DDP: with torchrun --nproc_per_node=N and CUDA_VISIBLE_DEVICES set to M GPUs, ranks 0..N-1 map to visible GPU idx = LOCAL_RANK // ranks_per_gpu (so N = M * ranks_per_gpu).')
     args = parser.parse_args()
 
     curr_dir = os.path.dirname(os.path.abspath(__file__))
@@ -74,16 +74,16 @@ if __name__ == "__main__":
     if args.max_entries is not None:
         config.setdefault('data', {})['max_entries'] = args.max_entries
         print(f'[main] overriding data.max_entries -> {args.max_entries}')
-    cla_cfg = config.setdefault('cla', {})
-    if args.cla_alpha is not None:
-        cla_cfg['alpha'] = args.cla_alpha
-        print(f'[main] overriding cla.alpha -> {args.cla_alpha}')
-    cla_tc = cla_cfg.setdefault('train', {})
-    for arg_name, cfg_key in [('cla_k_per_combo', 'k_per_combo'), ('cla_num_epochs', 'num_epochs'), ('cla_save_path', 'save_path')]:
+    caa_cfg = config.setdefault('caa', {})
+    if args.caa_alpha is not None:
+        caa_cfg['alpha'] = args.caa_alpha
+        print(f'[main] overriding caa.alpha -> {args.caa_alpha}')
+    caa_tc = caa_cfg.setdefault('train', {})
+    for arg_name, cfg_key in [('caa_k_per_combo', 'k_per_combo'), ('caa_num_epochs', 'num_epochs'), ('caa_save_path', 'save_path')]:
         v = getattr(args, arg_name)
         if v is not None:
-            cla_tc[cfg_key] = v
-            print(f'[main] overriding cla.train.{cfg_key} -> {v}')
+            caa_tc[cfg_key] = v
+            print(f'[main] overriding caa.train.{cfg_key} -> {v}')
     if args.coverage_min_gain is not None:
         config.setdefault('retrieval', {})['coverage_min_gain'] = args.coverage_min_gain
         print(f'[main] overriding retrieval.coverage_min_gain -> {args.coverage_min_gain}')
@@ -96,8 +96,8 @@ if __name__ == "__main__":
         from src.test_stage import test_stage
         if args.stage == 'offline':
             for ds_name, ds_type in datasets:
-                test_stage(curr_dir, ds_name, ds_type, args.model_name, args.augment_model, config, k=args.k, silo_k=args.silo_k, gold_only=args.gold_only, num_silos=args.num_silos, worker_id=args.worker_id, num_workers=args.num_workers, stage=args.stage, cla_eval_tag=args.cla_eval_tag)
+                test_stage(curr_dir, ds_name, ds_type, args.model_name, args.augment_model, config, k=args.k, silo_k=args.silo_k, gold_only=args.gold_only, num_silos=args.num_silos, worker_id=args.worker_id, num_workers=args.num_workers, stage=args.stage, caa_eval_tag=args.caa_eval_tag)
         else:
             assert len(datasets) == 1, f'test mode online/aggregate requires exactly one dataset:type pair (got {len(datasets)}: {datasets})'
             ds_name, ds_type = datasets[0]
-            test_stage(curr_dir, ds_name, ds_type, args.model_name, args.augment_model, config, k=args.k, silo_k=args.silo_k, gold_only=args.gold_only, num_silos=args.num_silos, worker_id=args.worker_id, num_workers=args.num_workers, stage=args.stage, cla_eval_tag=args.cla_eval_tag)
+            test_stage(curr_dir, ds_name, ds_type, args.model_name, args.augment_model, config, k=args.k, silo_k=args.silo_k, gold_only=args.gold_only, num_silos=args.num_silos, worker_id=args.worker_id, num_workers=args.num_workers, stage=args.stage, caa_eval_tag=args.caa_eval_tag)

@@ -34,12 +34,12 @@ retrieval:
   # (always keeps ≥1 doc). null = off (always pick k docs).
   coverage_min_gain: null
 
-cla:
+caa:
   d_a: 64                                  # cross-attention internal dim (per-layer projections)
   alpha: 0.1                               # scalar multiplier on the cross-attn residual: y = base + alpha * cross_attn_out. Tune per deployment; see docs/EXPERIMENT_LOG.md.
-  L_cla: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  L_caa: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
   colbert_path: '/data1/liangzhilin/model/colbertv2.0'
-  R_cache_dir: '/data1/liangzhilin/fedhop/cla/R_cache'
+  R_cache_dir: '/data1/liangzhilin/fedhop/caa/R_cache'
   R_max_doc_len: 256
   R_max_query_len: 32
   train:
@@ -53,4 +53,4 @@ cla:
     k_per_combo: 500                       # questions per (dataset, type); 6 combos * 500 = 3000 samples
     seed: 42
     dtype: 'bf16'
-    save_path: '/data1/liangzhilin/fedhop/cla/v6/cla.pt'
+    save_path: '/data1/liangzhilin/fedhop/caa/v6/caa.pt'

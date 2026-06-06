@@ -4,7 +4,7 @@ This is the single canonical place for everything that knows the aug.json schema
   - `Document`: per-passage object used by the LoRA trainer (passage + augments).
   - `make_doc_id`, `get_aug_path`, `load_aug_entries`: file paths and raw entries.
   - `iter_docs`, `entry_to_sample`: helpers for centralized/federated stages.
-  - `iter_cla_samples` + resolvers: CLA-specific sample iterator (Phase 3).
+  - `iter_caa_samples` + resolvers: CAA-specific sample iterator (Phase 3).
 
 aug.json schema (dataset/{mode}/{dataset}/{type}/aug.json):
     [
@@ -136,10 +136,10 @@ def entry_to_sample(entry, augment_model, dataset, dataset_type):
 
 
 # ============================================================================
-# CLA training sample builder (Phase 3, C1 dynamic-N sampling)
+# CAA training sample builder (Phase 3, C1 dynamic-N sampling)
 # ============================================================================
 
-def load_cla_training_entries(combos, root_dir='.', k_per_combo=50, mode='train'):
+def load_caa_training_entries(combos, root_dir='.', k_per_combo=50, mode='train'):
     """Load entries across multiple (dataset, type) combos, tagging each with origin."""
     out = []
     for ds, typ in combos:
@@ -189,8 +189,8 @@ def sample_n_docs(entry, augment_model, n_min=2, rng=None):
     return sampled
 
 
-def build_cla_sample(entry, sampled_indices, augment_model, dataset, dataset_type):
-    """Pack a sampled entry into a CLA training sample.
+def build_caa_sample(entry, sampled_indices, augment_model, dataset, dataset_type):
+    """Pack a sampled entry into a CAA training sample.
 
     Returns:
         {
@@ -218,12 +218,12 @@ def build_cla_sample(entry, sampled_indices, augment_model, dataset, dataset_typ
     return {'dataset': dataset, 'dataset_type': dataset_type, 'qid': entry.get('qid'), 'question': entry['question'], 'answer': entry['answer'], 'docs': docs, 'doc_ids': doc_ids, 'doc_passage_ids': doc_pids, 'gold_positions': gold_positions, 'sampled_indices': sampled_indices, 'all_passages': all_passages}
 
 
-def iter_cla_samples(combos, augment_model, root_dir='.', k_per_combo=50, mode='train', n_min=2, seed=42):
-    """Generator over CLA training samples across all combos with deterministic per-entry sampling.
+def iter_caa_samples(combos, augment_model, root_dir='.', k_per_combo=50, mode='train', n_min=2, seed=42):
+    """Generator over CAA training samples across all combos with deterministic per-entry sampling.
 
     Entries whose usable (non-empty-augment) passages can't satisfy n_min are silently skipped.
     """
-    tagged = load_cla_training_entries(combos, root_dir=root_dir, k_per_combo=k_per_combo, mode=mode)
+    tagged = load_caa_training_entries(combos, root_dir=root_dir, k_per_combo=k_per_combo, mode=mode)
     skipped = 0
     for item in tagged:
         ds, typ, entry = item['dataset'], item['dataset_type'], item['entry']
@@ -233,13 +233,13 @@ def iter_cla_samples(combos, augment_model, root_dir='.', k_per_combo=50, mode='
         if sampled is None:
             skipped += 1
             continue
-        yield build_cla_sample(entry, sampled, augment_model, ds, typ)
+        yield build_caa_sample(entry, sampled, augment_model, ds, typ)
     if skipped:
-        print(f'[iter_cla_samples] skipped {skipped} entries with insufficient usable passages')
+        print(f'[iter_caa_samples] skipped {skipped} entries with insufficient usable passages')
 
 
 def get_doc_lora_paths(sample, save_dir, model_name, lora_epoch, mode='train'):
-    """Resolve on-disk doc-LoRA paths for a CLA sample.
+    """Resolve on-disk doc-LoRA paths for a CAA sample.
 
     Mirrors train_stage / test_stage's path scheme:
       {save_dir}/{ds}/{type}/{model}/{mode}/le={le}/doc_lora/{doc_id}
@@ -248,15 +248,15 @@ def get_doc_lora_paths(sample, save_dir, model_name, lora_epoch, mode='train'):
     return [os.path.join(lora_root, did) for did in sample['doc_ids']]
 
 
-def get_R_for_sample(sample, encoder, cla_config, mode='train'):
+def get_R_for_sample(sample, encoder, caa_config, mode='train'):
     """Compute (or load cached) R and per-doc ColBERT scores, sliced to the sampled subset.
 
     Returns (R_sliced: float32 (N, N), scores_sliced: float32 (N,)). Cache key is
     full-doc-set per qid; slicing happens at runtime so dynamic N selections never
-    invalidate the cache. scores feed the CLA router prior (alpha_logits += log_softmax(scores)).
+    invalidate the cache. scores feed the CAA router prior (alpha_logits += log_softmax(scores)).
     """
     from src.r_matrix import get_or_compute_R_and_scores
-    R_full, scores_full = get_or_compute_R_and_scores(query=sample['question'], docs=sample['all_passages'], qid=sample['qid'], encoder=encoder, cache_dir=cla_config['R_cache_dir'], dataset=sample['dataset'], dataset_type=sample['dataset_type'], mode=mode, max_doc_len=cla_config['R_max_doc_len'], max_query_len=cla_config['R_max_query_len'])
+    R_full, scores_full = get_or_compute_R_and_scores(query=sample['question'], docs=sample['all_passages'], qid=sample['qid'], encoder=encoder, cache_dir=caa_config['R_cache_dir'], dataset=sample['dataset'], dataset_type=sample['dataset_type'], mode=mode, max_doc_len=caa_config['R_max_doc_len'], max_query_len=caa_config['R_max_query_len'])
     idx = sample['sampled_indices']
     return R_full[idx][:, idx].contiguous(), scores_full[idx].contiguous()
 

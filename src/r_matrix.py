@@ -132,7 +132,7 @@ def get_r_cache_path(cache_dir, dataset, dataset_type, mode, qid):
 
 
 def get_scores_cache_path(cache_dir, dataset, dataset_type, mode, qid):
-    """Sibling cache for the per-doc ColBERT scores used by the CLA router prior."""
+    """Sibling cache for the per-doc ColBERT scores used by the CAA router prior."""
     safe_qid = str(qid).replace('/', '_')
     return os.path.join(cache_dir, dataset, dataset_type, mode, f'{safe_qid}.scores.npy')
 

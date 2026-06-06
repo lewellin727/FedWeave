@@ -1,18 +1,18 @@
-"""CLA module training — DDP-aware, multi-rank per GPU supported.
+"""CAA module training — DDP-aware, multi-rank per GPU supported.
 
 Frozen: base LLM (bf16) + all per-doc LoRAs (loaded via mmap on each step).
-Trainable: CLA cross-attn + router params (no gate; alpha is a config scalar).
+Trainable: CAA cross-attn + router params (no gate; alpha is a config scalar).
 
 Per-step flow:
-  1. Pick one CLA sample {question, answer, doc-LoRA paths, R}.
+  1. Pick one CAA sample {question, answer, doc-LoRA paths, R}.
   2. Build input_ids = tokenize("Question: q\\nAnswer: " + answer); labels mask
      the prompt span with -100 so loss is only on the answer.
-  3. Forward through base LLM with MountedLoRAs(cla_module, paths, R) — the CLAMLP
-     wrappers route through the cross-attention path at layers L_cla.
+  3. Forward through base LLM with MountedLoRAs(caa_module, paths, R) — the CAAMLP
+     wrappers route through the cross-attention path at layers L_caa.
   4. Backward; accumulate over `grad_accum_steps`; AdamW step.
 
 DDP semantics:
-  - All ranks share one CLA module replica; gradients are NCCL all-reduced on
+  - All ranks share one CAA module replica; gradients are NCCL all-reduced on
     every backward via DDP wrapping the base_model.
   - Each rank pulls a disjoint sample shard (round-robin by global index).
   - Rank-0 owns all I/O: print, trajectory.json, ckpt save.
@@ -26,8 +26,8 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from src.cla import CLAModule, mount_cla, unmount_cla, MountedLoRAs
-from src.dataset import iter_cla_samples, get_doc_lora_paths, get_R_for_sample, assert_lora_paths_exist
+from src.caa import CAAModule, mount_caa, unmount_caa, MountedLoRAs
+from src.dataset import iter_caa_samples, get_doc_lora_paths, get_R_for_sample, assert_lora_paths_exist
 from src.r_matrix import ColBERTEncoder
 from src.utils import get_model
 
@@ -105,14 +105,14 @@ def build_input_with_labels(question, answer, tokenizer, device):
     return input_ids, attention_mask, labels
 
 
-def assert_only_cla_trainable(base_model, cla_module):
-    base_trainable = [n for n, p in base_model.named_parameters() if p.requires_grad and 'cla_module' not in n]
+def assert_only_caa_trainable(base_model, caa_module):
+    base_trainable = [n for n, p in base_model.named_parameters() if p.requires_grad and 'caa_module' not in n]
     if base_trainable:
         raise RuntimeError(f'unexpected trainable base params after freeze: {base_trainable[:5]}...')
-    cla_trainable = sum(p.numel() for p in cla_module.parameters() if p.requires_grad)
-    if cla_trainable == 0:
-        raise RuntimeError('CLA module has 0 trainable params')
-    return cla_trainable
+    caa_trainable = sum(p.numel() for p in caa_module.parameters() if p.requires_grad)
+    if caa_trainable == 0:
+        raise RuntimeError('CAA module has 0 trainable params')
+    return caa_trainable
 
 
 def shard_samples(samples, rank, world):
@@ -124,12 +124,12 @@ def shard_samples(samples, rank, world):
 # Single forward+backward
 # ============================================================================
 
-def cla_train_step(model_to_call, cla_module, sample, lora_paths, R, scores, tokenizer, optimizer, device, base_dtype, accum_steps=1, do_step=True):
-    """One forward/backward pass (CLA module only is trainable). Returns task loss."""
+def caa_train_step(model_to_call, caa_module, sample, lora_paths, R, scores, tokenizer, optimizer, device, base_dtype, accum_steps=1, do_step=True):
+    """One forward/backward pass (CAA module only is trainable). Returns task loss."""
     input_ids, attention_mask, labels = build_input_with_labels(sample['question'], sample['answer'], tokenizer, device)
     R_d = R.to(device) if torch.is_tensor(R) else torch.tensor(R, device=device, dtype=torch.float32)
     scores_d = scores.to(device) if torch.is_tensor(scores) else torch.tensor(scores, device=device, dtype=torch.float32)
-    with MountedLoRAs(cla_module, lora_paths, R_d, scores_d, device=device, dtype=base_dtype):
+    with MountedLoRAs(caa_module, lora_paths, R_d, scores_d, device=device, dtype=base_dtype):
         outputs = model_to_call(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         task_loss = outputs.loss
     (task_loss / accum_steps).backward()
@@ -140,13 +140,13 @@ def cla_train_step(model_to_call, cla_module, sample, lora_paths, R, scores, tok
 
 
 @torch.no_grad()
-def cla_eval_loss(model_to_call, cla_module, samples, encoder, cla_config, tokenizer, device, base_dtype, save_dir, model_name, lora_epoch, world=1):
+def caa_eval_loss(model_to_call, caa_module, samples, encoder, caa_config, tokenizer, device, base_dtype, save_dir, model_name, lora_epoch, world=1):
     """Mean loss over a held-out sample list. Under DDP, samples is the per-rank shard;
     returns the globally averaged loss via all_reduce.
     """
     was_training = model_to_call.training
     model_to_call.eval()
-    cla_module.eval()
+    caa_module.eval()
     total, n = 0.0, 0
     for s in samples:
         lora_paths = get_doc_lora_paths(s, save_dir, model_name, lora_epoch, mode='train')
@@ -154,10 +154,10 @@ def cla_eval_loss(model_to_call, cla_module, samples, encoder, cla_config, token
             assert_lora_paths_exist(s, lora_paths)
         except FileNotFoundError:
             continue
-        R, scores = get_R_for_sample(s, encoder, cla_config, mode='train')
+        R, scores = get_R_for_sample(s, encoder, caa_config, mode='train')
         R = R.to(device); scores = scores.to(device)
         input_ids, attention_mask, labels = build_input_with_labels(s['question'], s['answer'], tokenizer, device)
-        with MountedLoRAs(cla_module, lora_paths, R, scores, device=device, dtype=base_dtype):
+        with MountedLoRAs(caa_module, lora_paths, R, scores, device=device, dtype=base_dtype):
             out = model_to_call(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         total += out.loss.item()
         n += 1
@@ -167,7 +167,7 @@ def cla_eval_loss(model_to_call, cla_module, samples, encoder, cla_config, token
         total, n = float(t[0].item()), int(t[1].item())
     if was_training:
         model_to_call.train()
-    cla_module.train()
+    caa_module.train()
     return total / max(n, 1), n
 
 
@@ -175,8 +175,8 @@ def cla_eval_loss(model_to_call, cla_module, samples, encoder, cla_config, token
 # Full training loop
 # ============================================================================
 
-def cla_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, grad_accum_steps=8, weight_decay=0.01, log_every=10, val_every=50, val_ratio=0.1, k_per_combo=50, seed=42, save_path=None, dtype=torch.bfloat16, ranks_per_gpu=1):
-    """Train CLAModule on samples from `combos`. DDP-aware.
+def caa_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, grad_accum_steps=8, weight_decay=0.01, log_every=10, val_every=50, val_ratio=0.1, k_per_combo=50, seed=42, save_path=None, dtype=torch.bfloat16, ranks_per_gpu=1):
+    """Train CAAModule on samples from `combos`. DDP-aware.
 
     When LOCAL_RANK / WORLD_SIZE env vars are set (torchrun), runs in DDP mode:
       - each rank binds to GPU index = LOCAL_RANK // ranks_per_gpu
@@ -187,7 +187,7 @@ def cla_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, 
     gpu_idx, world, rank, is_main = setup_ddp(ranks_per_gpu=ranks_per_gpu)
     save_dir = config['train']['save_dir']
     lora_epoch = config['train']['lora_epoch']
-    cla_config = config['cla']
+    caa_config = config['caa']
 
     device_map = {"": f"cuda:{gpu_idx}"} if gpu_idx is not None else "auto"
     base_model, tokenizer, _ = get_model(model_name, dtype=dtype, device_map=device_map)
@@ -197,13 +197,13 @@ def cla_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, 
     device = next(base_model.parameters()).device
     main_only_print(f'=== Base model {model_name} dtype={base_dtype} world={world} rank={rank} device={device} ===')
 
-    alpha = float(cla_config.get('alpha', 0.1))
-    cla_module = CLAModule(hidden_size=base_model.config.hidden_size, intermediate_size=base_model.config.intermediate_size, L_cla=cla_config['L_cla'], d_a=cla_config['d_a'], alpha=alpha).to(device)
+    alpha = float(caa_config.get('alpha', 0.1))
+    caa_module = CAAModule(hidden_size=base_model.config.hidden_size, intermediate_size=base_model.config.intermediate_size, L_caa=caa_config['L_caa'], d_a=caa_config['d_a'], alpha=alpha).to(device)
     main_only_print(f'=== alpha = {alpha:.3g} ===')
 
-    mount_cla(base_model, cla_module, cla_config['L_cla'])
-    n_trainable = assert_only_cla_trainable(base_model, cla_module)
-    main_only_print(f'=== CLA mounted on layers {cla_config["L_cla"]}, trainable params: {n_trainable:,} ===')
+    mount_caa(base_model, caa_module, caa_config['L_caa'])
+    n_trainable = assert_only_caa_trainable(base_model, caa_module)
+    main_only_print(f'=== CAA mounted on layers {caa_config["L_caa"]}, trainable params: {n_trainable:,} ===')
 
     if world > 1:
         model_to_call = DDP(base_model, device_ids=[gpu_idx], find_unused_parameters=False, gradient_as_bucket_view=True)
@@ -211,11 +211,11 @@ def cla_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, 
     else:
         model_to_call = base_model
 
-    encoder = ColBERTEncoder(cla_config['colbert_path'], device=device, dtype=torch.float32)
-    optimizer = torch.optim.AdamW(cla_module.parameters(), lr=lr, weight_decay=weight_decay)
+    encoder = ColBERTEncoder(caa_config['colbert_path'], device=device, dtype=torch.float32)
+    optimizer = torch.optim.AdamW(caa_module.parameters(), lr=lr, weight_decay=weight_decay)
     main_only_print(f'=== Optimizer: AdamW lr={lr} wd={weight_decay} grad_accum={grad_accum_steps} epochs={num_epochs} ===')
 
-    all_samples = list(iter_cla_samples(combos, augment_model, k_per_combo=k_per_combo, mode='train', seed=seed))
+    all_samples = list(iter_caa_samples(combos, augment_model, k_per_combo=k_per_combo, mode='train', seed=seed))
     rng = torch.Generator().manual_seed(seed)
     val_n = int(round(val_ratio * len(all_samples)))
     val_idx_set = set(torch.randperm(len(all_samples), generator=rng).tolist()[:val_n])
@@ -225,7 +225,7 @@ def cla_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, 
     val_samples = shard_samples(val_samples_global, rank, world)
     main_only_print(f'=== Split: train_global={len(train_samples_global)} val_global={len(val_samples_global)} | this rank: train={len(train_samples)} val={len(val_samples)} ===')
 
-    trajectory = {'config': {'num_epochs': num_epochs, 'lr': lr, 'grad_accum_steps': grad_accum_steps, 'val_ratio': val_ratio, 'val_every': val_every, 'log_every': log_every, 'n_train': len(train_samples_global), 'n_val': len(val_samples_global), 'dtype': str(dtype), 'L_cla': cla_config['L_cla'], 'alpha': alpha, 'world_size': world, 'ranks_per_gpu': ranks_per_gpu}, 'steps': []}
+    trajectory = {'config': {'num_epochs': num_epochs, 'lr': lr, 'grad_accum_steps': grad_accum_steps, 'val_ratio': val_ratio, 'val_every': val_every, 'log_every': log_every, 'n_train': len(train_samples_global), 'n_val': len(val_samples_global), 'dtype': str(dtype), 'L_caa': caa_config['L_caa'], 'alpha': alpha, 'world_size': world, 'ranks_per_gpu': ranks_per_gpu}, 'steps': []}
     save_dir_for_ckpt = os.path.dirname(save_path) if save_path else None
     if save_dir_for_ckpt and is_main:
         os.makedirs(save_dir_for_ckpt, exist_ok=True)
@@ -250,10 +250,10 @@ def cla_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, 
                 assert_lora_paths_exist(sample, lora_paths)
             except FileNotFoundError:
                 continue
-            R, scores = get_R_for_sample(sample, encoder, cla_config, mode='train')
+            R, scores = get_R_for_sample(sample, encoder, caa_config, mode='train')
             accum_count += 1
             do_step = (accum_count == grad_accum_steps)
-            loss_val = cla_train_step(model_to_call, cla_module, sample, lora_paths, R, scores, tokenizer, optimizer, device, base_dtype, accum_steps=grad_accum_steps, do_step=do_step)
+            loss_val = caa_train_step(model_to_call, caa_module, sample, lora_paths, R, scores, tokenizer, optimizer, device, base_dtype, accum_steps=grad_accum_steps, do_step=do_step)
             losses_window.append(loss_val)
             if do_step:
                 accum_count = 0
@@ -265,7 +265,7 @@ def cla_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, 
                     record = {'step': step, 'epoch': epoch, 'train_loss': avg_loss, 'elapsed_sec': elapsed}
                     print(f'[e{epoch} s{step:5d}] loss={avg_loss:.4f}  elapsed={elapsed:.0f}s')
                     if step % val_every == 0:
-                        val_loss, n_used = cla_eval_loss(model_to_call, cla_module, val_samples, encoder, cla_config, tokenizer, device, base_dtype, save_dir, model_name, lora_epoch, world=world)
+                        val_loss, n_used = caa_eval_loss(model_to_call, caa_module, val_samples, encoder, caa_config, tokenizer, device, base_dtype, save_dir, model_name, lora_epoch, world=world)
                         record['val_loss'] = val_loss
                         record['val_n_used'] = n_used
                         marker = ''
@@ -273,20 +273,20 @@ def cla_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, 
                             best_val = val_loss
                             best_step = step
                             if best_save_path:
-                                torch.save(cla_module.state_dict(), best_save_path)
+                                torch.save(caa_module.state_dict(), best_save_path)
                                 marker = '  ↓ NEW BEST (saved)'
                         print(f'    val_loss={val_loss:.4f} (n={n_used}){marker}')
                     trajectory['steps'].append(record)
                     with open(trajectory_path, 'w') as f:
                         json.dump(trajectory, f, indent=2)
                 elif step % val_every == 0 and world > 1:
-                    cla_eval_loss(model_to_call, cla_module, val_samples, encoder, cla_config, tokenizer, device, base_dtype, save_dir, model_name, lora_epoch, world=world)
+                    caa_eval_loss(model_to_call, caa_module, val_samples, encoder, caa_config, tokenizer, device, base_dtype, save_dir, model_name, lora_epoch, world=world)
 
     if is_main and save_path:
-        torch.save(cla_module.state_dict(), save_path)
-        print(f'\nSaved final CLA ckpt -> {save_path}')
+        torch.save(caa_module.state_dict(), save_path)
+        print(f'\nSaved final CAA ckpt -> {save_path}')
         if best_step >= 0:
-            print(f'Best-val CLA ckpt    -> {best_save_path}  (val_loss={best_val:.4f} @ step {best_step})')
+            print(f'Best-val CAA ckpt    -> {best_save_path}  (val_loss={best_val:.4f} @ step {best_step})')
         if trajectory_path:
             trajectory['best_val_loss'] = best_val
             trajectory['best_step'] = best_step
@@ -295,6 +295,6 @@ def cla_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, 
                 json.dump(trajectory, f, indent=2)
             print(f'Saved trajectory     -> {trajectory_path}')
 
-    unmount_cla(base_model)
+    unmount_caa(base_model)
     cleanup_ddp()
-    return cla_module
+    return caa_module

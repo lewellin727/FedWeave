@@ -3,7 +3,7 @@
 Everything that deals with a single per-document LoRA adapter on disk:
   - `train_lora`:              train one adapter and save it bf16 to disk.
   - `load_doc_lora_weights`:   load a saved PEFT adapter into a per-layer tensor dict
-                               (used by CLA's MountedLoRAs to attach LoRAs at runtime).
+                               (used by CAA's MountedLoRAs to attach LoRAs at runtime).
 
 Adapter directory layout matches PEFT's `save_pretrained`:
   <lora_dir>/<doc_id>/adapter_config.json

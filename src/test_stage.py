@@ -4,7 +4,7 @@ Pipeline (test mode runs on a single (dataset, type) pair):
   offline:   ensure every test passage has a doc-LoRA on disk (silo-local training).
   online:    pool test passages, split into `num_silos` silos; each silo runs
              ColBERT MaxSim local retrieval; server runs coverage-greedy global
-             selection; CLA forward aggregates the selected per-doc LoRAs to
+             selection; CAA forward aggregates the selected per-doc LoRAs to
              generate the answer.
   aggregate: merge worker shards into final result.json + eval.json.
 
@@ -21,28 +21,28 @@ import json
 import torch
 
 from src.utils import get_model, evaluate, shard_list, shard_indices
-from src.inference import cla_inference
+from src.inference import caa_inference
 from src.lora import train_lora
-from src.cla import CLAModule, mount_cla, unmount_cla
+from src.caa import CAAModule, mount_caa, unmount_caa
 from src.r_matrix import ColBERTEncoder
 from src.dataset import load_aug_entries, iter_docs, entry_to_sample, make_doc_id
 from src.silo import ColBertSilo, coverage_greedy_select
 
 
 def test_stage(root_dir, dataset_name, dataset_type, model_name, augment_model, config, k=5, silo_k=None, gold_only=False,
-               num_silos=6, worker_id=0, num_workers=1, stage='all', cla_eval_tag=None):
+               num_silos=6, worker_id=0, num_workers=1, stage='all', caa_eval_tag=None):
     """Federated test scenario on dataset/test/{dataset_name}/{dataset_type}/.
 
-    Online stage loads the CLA module from config['cla']['train']['save_path']
-    and uses CLA forward for LoRA aggregation (alpha read from config['cla']['alpha']).
+    Online stage loads the CAA module from config['caa']['train']['save_path']
+    and uses CAA forward for LoRA aggregation (alpha read from config['caa']['alpha']).
     """
     assert stage in ('all', 'offline', 'online', 'aggregate'), f'test_stage: stage must be in {{all, offline, online, aggregate}}, got {stage}'
     save_dir = config['train']['save_dir']
     le = config['train']['lora_epoch']
     lora_save_dir = os.path.join(save_dir, f'{dataset_name}/{dataset_type}/{model_name}/test/le={le}/doc_lora')
-    cla_subdir = cla_eval_tag if cla_eval_tag is not None else 'cla'
+    caa_subdir = caa_eval_tag if caa_eval_tag is not None else 'caa'
     eval_subdir = 'gold_only' if gold_only else f'silo_K={num_silos}_k={k}'
-    eval_dir = os.path.join(save_dir, f'{dataset_name}/{dataset_type}/{model_name}/test/le={le}/{cla_subdir}/{eval_subdir}')
+    eval_dir = os.path.join(save_dir, f'{dataset_name}/{dataset_type}/{model_name}/test/le={le}/{caa_subdir}/{eval_subdir}')
 
     if stage in ('all', 'offline'):
         _ensure_doc_loras(root_dir, dataset_name, dataset_type, model_name, augment_model, config, lora_save_dir, gold_only, worker_id, num_workers)
@@ -111,9 +111,9 @@ def _federated_inference(root_dir, dataset_name, dataset_type, model_name, augme
     silo_json = json.load(open(silo_path, 'r'))
     assert len(silo_json) == num_silos, f'silo.json has {len(silo_json)} silos but num_silos={num_silos}'
 
-    # Single ColBERT encoder shared by retrieval (ColBertSilo) and CLA (R-matrix).
-    cla_cfg = config['cla']
-    encoder = ColBERTEncoder(cla_cfg['colbert_path'], device='cuda:0', dtype=torch.float32)
+    # Single ColBERT encoder shared by retrieval (ColBertSilo) and CAA (R-matrix).
+    caa_cfg = config['caa']
+    encoder = ColBERTEncoder(caa_cfg['colbert_path'], device='cuda:0', dtype=torch.float32)
 
     silos = []
     total_docs = total_skipped_no_aug = total_skipped_no_lora = 0
@@ -133,7 +133,7 @@ def _federated_inference(root_dir, dataset_name, dataset_type, model_name, augme
         total_docs += len(kept_docs); total_skipped_no_aug += n_no_aug; total_skipped_no_lora += n_no_lora
         silo_summary.append(f's{sid}={len(kept_docs)}(-{n_no_aug}aug,-{n_no_lora}lora)')
         if kept_docs:
-            silos.append(ColBertSilo(sid, kept_docs, kept_gids, encoder, colbert_cache_dir, max_doc_len=cla_cfg.get('R_max_doc_len', 256)))
+            silos.append(ColBertSilo(sid, kept_docs, kept_gids, encoder, colbert_cache_dir, max_doc_len=caa_cfg.get('R_max_doc_len', 256)))
     print(f'[w{worker_id}/{num_workers}] silo.json loaded: {silo_path}')
     print(f'[w{worker_id}/{num_workers}] silos initialized: ' + ', '.join(silo_summary))
     print(f'[w{worker_id}/{num_workers}] total usable docs: {total_docs} (skipped {total_skipped_no_aug} no-aug, {total_skipped_no_lora} no-lora)')
@@ -143,21 +143,21 @@ def _federated_inference(root_dir, dataset_name, dataset_type, model_name, augme
 
     base_model, tokenizer, generation_config = get_model(model_name, device_map={'': 'cuda:0'})
 
-    ckpt_path = cla_cfg['train']['save_path'].replace('.pt', '_best.pt')
+    ckpt_path = caa_cfg['train']['save_path'].replace('.pt', '_best.pt')
     if not os.path.exists(ckpt_path):
-        ckpt_path = cla_cfg['train']['save_path']
-    assert os.path.exists(ckpt_path), f'CLA ckpt not found: {ckpt_path}. Train CLA first.'
-    alpha = float(cla_cfg.get('alpha', 0.1))
-    cla_module = CLAModule(hidden_size=base_model.config.hidden_size, intermediate_size=base_model.config.intermediate_size, L_cla=cla_cfg['L_cla'], d_a=cla_cfg['d_a'], alpha=alpha).to(base_model.device)
+        ckpt_path = caa_cfg['train']['save_path']
+    assert os.path.exists(ckpt_path), f'CAA ckpt not found: {ckpt_path}. Train CAA first.'
+    alpha = float(caa_cfg.get('alpha', 0.1))
+    caa_module = CAAModule(hidden_size=base_model.config.hidden_size, intermediate_size=base_model.config.intermediate_size, L_caa=caa_cfg['L_caa'], d_a=caa_cfg['d_a'], alpha=alpha).to(base_model.device)
     state_dict = torch.load(ckpt_path, map_location=base_model.device, weights_only=True)
-    missing, unexpected = cla_module.load_state_dict(state_dict, strict=False)
+    missing, unexpected = caa_module.load_state_dict(state_dict, strict=False)
     if unexpected:
         print(f'[w{worker_id}/{num_workers}] WARNING: ckpt has {len(unexpected)} unexpected keys not in current model (e.g. {unexpected[0]}); ignored.')
     if missing:
         print(f'[w{worker_id}/{num_workers}] WARNING: model has {len(missing)} keys not in ckpt (e.g. {missing[0]}); using random init for those.')
-    cla_module.eval()
-    mount_cla(base_model, cla_module, cla_cfg['L_cla'])
-    print(f'[w{worker_id}/{num_workers}] CLA ckpt loaded from {ckpt_path}; alpha={alpha}; mounted on {len(cla_cfg["L_cla"])} layers.')
+    caa_module.eval()
+    mount_caa(base_model, caa_module, caa_cfg['L_caa'])
+    print(f'[w{worker_id}/{num_workers}] CAA ckpt loaded from {ckpt_path}; alpha={alpha}; mounted on {len(caa_cfg["L_caa"])} layers.')
 
     my_indices = shard_indices(len(entries), worker_id, num_workers)
     print(f'\n[w{worker_id}/{num_workers}] federated inference on {len(my_indices)}/{len(entries)} questions...')
@@ -179,7 +179,7 @@ def _federated_inference(root_dir, dataset_name, dataset_type, model_name, augme
                 shard_records.append({'idx': idx, 'qid': sample['qid'], 'pred': '', 'answer': sample['answer'], 'selected_doc_ids': [], 'silos': []})
                 continue
         else:
-            q_emb = encoder.encode([question], max_length=cla_cfg.get('R_max_query_len', 32))[0]
+            q_emb = encoder.encode([question], max_length=caa_cfg.get('R_max_query_len', 32))[0]
             pooled = []
             for s in silos:
                 pooled.extend(s.retrieve_with_coverage(q_emb, k=silo_k))
@@ -193,14 +193,14 @@ def _federated_inference(root_dir, dataset_name, dataset_type, model_name, augme
         silo_origins = [gid_to_silo.get(gid, '?') for gid in selected_global_ids]
         lora_paths = [os.path.join(lora_save_dir, gid) for gid in selected_global_ids]
         selected_passages = [gid_to_passage[gid] for gid in selected_global_ids]
-        pred = cla_inference(question, base_model, cla_module, lora_paths, selected_passages, encoder, cla_cfg, tokenizer, generation_config)
+        pred = caa_inference(question, base_model, caa_module, lora_paths, selected_passages, encoder, caa_cfg, tokenizer, generation_config)
 
         shard_records.append({'idx': idx, 'qid': sample['qid'], 'pred': pred, 'answer': sample['answer'], 'selected_doc_ids': selected_global_ids, 'silos': silo_origins})
         print(f'  pred:   {pred}')
         print(f'  truth:  {sample["answer"]}')
         print(f'  silos:  {silo_origins}')
 
-    unmount_cla(base_model)
+    unmount_caa(base_model)
 
     shard_dir = os.path.join(eval_dir, 'shards')
     os.makedirs(shard_dir, exist_ok=True)
