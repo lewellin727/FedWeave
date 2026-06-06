@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # ------------------------------------------ llm model ------------------------------------------
 
-MODEL_DIR = "/data1/liangzhilin/model"
+MODEL_DIR = "/path/to/models"
 def get_model_path(model_name):
     if model_name == "llama3-8b-instruct":
         return f"{MODEL_DIR}/Meta-Llama-3-8B"

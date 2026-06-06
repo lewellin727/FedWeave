@@ -11,7 +11,7 @@ prep_dataset:
     alpha: 0.1
     split_type: 'dense'
     split_model: 'all-MiniLM-L6-v2'
-    split_model_path: '/data1/liangzhilin/model/all-MiniLM-L6-v2'
+    split_model_path: '/path/to/models/all-MiniLM-L6-v2'
   augment:
     max_new_tokens: 512
     temperature: 0.7
@@ -25,8 +25,8 @@ train:
   lr: 3e-4
   lora_epoch: 3
   batch_size: 1
-  save_dir: '/data1/liangzhilin/fedhop'
-  training_output_dir: '/data1/liangzhilin/fedhop/training_output'
+  save_dir: '/path/to/fedhop_output'
+  training_output_dir: '/path/to/fedhop_output/training_output'
 
 retrieval:
   # Absolute threshold on marginal coverage gain (cosine-sum over T_q query tokens)
@@ -38,8 +38,8 @@ caa:
   d_a: 64                                  # cross-attention internal dim (per-layer projections)
   alpha: 0.1                               # scalar multiplier on the cross-attn residual: y = base + alpha * cross_attn_out. Tune per deployment; see docs/EXPERIMENT_LOG.md.
   L_caa: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-  colbert_path: '/data1/liangzhilin/model/colbertv2.0'
-  R_cache_dir: '/data1/liangzhilin/fedhop/caa/R_cache'
+  colbert_path: '/path/to/models/colbertv2.0'
+  R_cache_dir: '/path/to/fedhop_output/caa/R_cache'
   R_max_doc_len: 256
   R_max_query_len: 32
   train:
@@ -53,4 +53,4 @@ caa:
     k_per_combo: 500                       # questions per (dataset, type); 6 combos * 500 = 3000 samples
     seed: 42
     dtype: 'bf16'
-    save_path: '/data1/liangzhilin/fedhop/caa/v6/caa.pt'
+    save_path: '/path/to/fedhop_output/caa/v6/caa.pt'
