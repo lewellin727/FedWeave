@@ -25,8 +25,8 @@ train:
   lr: 3e-4
   lora_epoch: 3
   batch_size: 1
-  save_dir: '/path/to/fedhop_output'
-  training_output_dir: '/path/to/fedhop_output/training_output'
+  save_dir: '/path/to/fedweave_output'
+  training_output_dir: '/path/to/fedweave_output/training_output'
 
 retrieval:
   # Absolute threshold on marginal coverage gain (cosine-sum over T_q query tokens)
@@ -39,7 +39,7 @@ caa:
   alpha: 0.1                               # scalar multiplier on the cross-attn residual: y = base + alpha * cross_attn_out. Tune per deployment; see docs/EXPERIMENT_LOG.md.
   L_caa: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
   colbert_path: '/path/to/models/colbertv2.0'
-  R_cache_dir: '/path/to/fedhop_output/caa/R_cache'
+  R_cache_dir: '/path/to/fedweave_output/caa/R_cache'
   R_max_doc_len: 256
   R_max_query_len: 32
   train:
@@ -53,4 +53,4 @@ caa:
     k_per_combo: 500                       # questions per (dataset, type); 6 combos * 500 = 3000 samples
     seed: 42
     dtype: 'bf16'
-    save_path: '/path/to/fedhop_output/caa/v6/caa.pt'
+    save_path: '/path/to/fedweave_output/caa/v6/caa.pt'

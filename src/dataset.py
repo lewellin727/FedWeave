@@ -1,4 +1,4 @@
-"""Data layer for FedHop: aug.json I/O, Document model, and sample builders.
+"""Data layer for FedWeave: aug.json I/O, Document model, and sample builders.
 
 This is the single canonical place for everything that knows the aug.json schema:
   - `Document`: per-passage object used by the LoRA trainer (passage + augments).

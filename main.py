@@ -1,4 +1,4 @@
-"""FedHop entry point.
+"""FedWeave entry point.
 
 Thin CLI dispatcher. Each --mode delegates the full pipeline to its stage file.
 
