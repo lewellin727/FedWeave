@@ -1,4 +1,4 @@
-# FedWeave: Federated Parametric RAG for Multi-Evidence Reasoning
+# FedWeave
 
 This repository contains the official implementation of our paper:
 
