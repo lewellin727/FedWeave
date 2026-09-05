@@ -4,7 +4,7 @@ This is the single canonical place for everything that knows the aug.json schema
   - `Document`: per-passage object used by the LoRA trainer (passage + augments).
   - `make_doc_id`, `get_aug_path`, `load_aug_entries`: file paths and raw entries.
   - `iter_docs`, `entry_to_sample`: helpers for centralized/federated stages.
-  - `iter_caa_samples` + resolvers: CAA-specific sample iterator (Phase 3).
+  - `iter_caa_samples` + resolvers: CAA training sample construction.
 
 aug.json schema (dataset/{mode}/{dataset}/{type}/aug.json):
     [
@@ -27,6 +27,7 @@ Invariants:
 import os
 import json
 import random
+import hashlib
 
 from datasets import Dataset as HFDataset
 
@@ -122,21 +123,13 @@ def iter_docs(entries, augment_model):
             yield psg['id'], doc
 
 
-def entry_to_sample(entry, augment_model, dataset, dataset_type):
-    """Convert one aug.json entry into the generic stage sample dict (used by test_stage)."""
-    docs, doc_ids, gold_indices = [], [], []
-    for i, (psg, aug) in enumerate(zip(entry['passages'], entry['augments'])):
-        assert psg['id'] == aug['id']
-        doc = Document(passage=psg['passage'], aug_item=aug, augment_model=augment_model, title=psg.get('title'), label=psg.get('label'), supporting_sents=psg.get('supporting_sents'))
-        docs.append(doc)
-        doc_ids.append(make_doc_id(dataset, dataset_type, psg['id']))
-        if psg.get('label') == 'gold':
-            gold_indices.append(i)
-    return {'qid': entry.get('qid'), 'question': entry['question'], 'answer': entry['answer'], 'docs': docs, 'doc_ids': doc_ids, 'gold_indices': gold_indices}
+def entry_to_sample(entry):
+    """Return the fields required for test-time inference and evaluation."""
+    return {'qid': entry.get('qid'), 'question': entry['question'], 'answer': entry['answer']}
 
 
 # ============================================================================
-# CAA training sample builder (Phase 3, C1 dynamic-N sampling)
+# CAA training sample construction
 # ============================================================================
 
 def load_caa_training_entries(combos, root_dir='.', k_per_combo=50, mode='train'):
@@ -147,11 +140,6 @@ def load_caa_training_entries(combos, root_dir='.', k_per_combo=50, mode='train'
         for e in entries:
             out.append({'dataset': ds, 'dataset_type': typ, 'entry': e})
     return out
-
-
-def gold_indices(entry):
-    """Return positions in entry['passages'] whose label == 'gold'."""
-    return [i for i, p in enumerate(entry['passages']) if p.get('label') == 'gold']
 
 
 def usable_passage_indices(entry, augment_model):
@@ -166,7 +154,7 @@ def usable_passage_indices(entry, augment_model):
 
 
 def sample_n_docs(entry, augment_model, n_min=2, rng=None):
-    """C1 sampling restricted to usable (non-empty-augment) passages.
+    """Sample a variable-size document set from usable passages.
 
     N uniform in [max(n_min, num_gold_usable), num_usable]. Returns None when
     the entry can't satisfy n_min (e.g. a gold doc had empty augments and
@@ -189,33 +177,25 @@ def sample_n_docs(entry, augment_model, n_min=2, rng=None):
     return sampled
 
 
-def build_caa_sample(entry, sampled_indices, augment_model, dataset, dataset_type):
+def build_caa_sample(entry, sampled_indices, dataset, dataset_type):
     """Pack a sampled entry into a CAA training sample.
 
     Returns:
         {
           'dataset', 'dataset_type', 'qid', 'question', 'answer',
-          'docs':            List[Document],          # len == N, ordered by sampled_indices
           'doc_ids':         List[str],               # global ids matching docs
-          'doc_passage_ids': List[int],               # local passage 'id'
-          'gold_positions':  List[int],               # positions in 'docs' that are gold
           'sampled_indices': List[int],               # original positions chosen (for R slicing)
           'all_passages':    List[str],               # full passage list (for caching full-R)
         }
     """
-    docs, doc_ids, doc_pids, gold_positions = [], [], [], []
-    for new_pos, orig_idx in enumerate(sampled_indices):
+    doc_ids = []
+    for orig_idx in sampled_indices:
         psg = entry['passages'][orig_idx]
         aug = entry['augments'][orig_idx]
         assert psg['id'] == aug['id'], f"id mismatch at idx {orig_idx} in qid={entry.get('qid')}"
-        doc = Document(passage=psg['passage'], aug_item=aug, augment_model=augment_model, title=psg.get('title'), label=psg.get('label'), supporting_sents=psg.get('supporting_sents'))
-        docs.append(doc)
         doc_ids.append(make_doc_id(dataset, dataset_type, psg['id']))
-        doc_pids.append(psg['id'])
-        if psg.get('label') == 'gold':
-            gold_positions.append(new_pos)
     all_passages = [p['passage'] for p in entry['passages']]
-    return {'dataset': dataset, 'dataset_type': dataset_type, 'qid': entry.get('qid'), 'question': entry['question'], 'answer': entry['answer'], 'docs': docs, 'doc_ids': doc_ids, 'doc_passage_ids': doc_pids, 'gold_positions': gold_positions, 'sampled_indices': sampled_indices, 'all_passages': all_passages}
+    return {'dataset': dataset, 'dataset_type': dataset_type, 'qid': entry.get('qid'), 'question': entry['question'], 'answer': entry['answer'], 'doc_ids': doc_ids, 'sampled_indices': sampled_indices, 'all_passages': all_passages}
 
 
 def iter_caa_samples(combos, augment_model, root_dir='.', k_per_combo=50, mode='train', n_min=2, seed=42):
@@ -228,12 +208,13 @@ def iter_caa_samples(combos, augment_model, root_dir='.', k_per_combo=50, mode='
     for item in tagged:
         ds, typ, entry = item['dataset'], item['dataset_type'], item['entry']
         key = f'{ds}|{typ}|{entry.get("qid")}|{seed}'
-        rng = random.Random(hash(key) & 0xFFFFFFFF)
+        stable_seed = int.from_bytes(hashlib.sha256(key.encode('utf-8')).digest()[:8], 'big')
+        rng = random.Random(stable_seed)
         sampled = sample_n_docs(entry, augment_model, n_min=n_min, rng=rng)
         if sampled is None:
             skipped += 1
             continue
-        yield build_caa_sample(entry, sampled, augment_model, ds, typ)
+        yield build_caa_sample(entry, sampled, ds, typ)
     if skipped:
         print(f'[iter_caa_samples] skipped {skipped} entries with insufficient usable passages')
 

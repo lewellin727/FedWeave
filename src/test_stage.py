@@ -29,7 +29,7 @@ from src.dataset import load_aug_entries, iter_docs, entry_to_sample, make_doc_i
 from src.silo import ColBertSilo, coverage_greedy_select
 
 
-def test_stage(root_dir, dataset_name, dataset_type, model_name, augment_model, config, k=5, silo_k=None, gold_only=False,
+def test_stage(root_dir, dataset_name, dataset_type, model_name, augment_model, config, k=5, silo_k=None,
                num_silos=6, worker_id=0, num_workers=1, stage='all', caa_eval_tag=None):
     """Federated test scenario on dataset/test/{dataset_name}/{dataset_type}/.
 
@@ -41,14 +41,14 @@ def test_stage(root_dir, dataset_name, dataset_type, model_name, augment_model, 
     le = config['train']['lora_epoch']
     lora_save_dir = os.path.join(save_dir, f'{dataset_name}/{dataset_type}/{model_name}/test/le={le}/doc_lora')
     caa_subdir = caa_eval_tag if caa_eval_tag is not None else 'caa'
-    eval_subdir = 'gold_only' if gold_only else f'silo_K={num_silos}_k={k}'
+    eval_subdir = f'silo_K={num_silos}_k={k}'
     eval_dir = os.path.join(save_dir, f'{dataset_name}/{dataset_type}/{model_name}/test/le={le}/{caa_subdir}/{eval_subdir}')
 
     if stage in ('all', 'offline'):
-        _ensure_doc_loras(root_dir, dataset_name, dataset_type, model_name, augment_model, config, lora_save_dir, gold_only, worker_id, num_workers)
+        _ensure_doc_loras(root_dir, dataset_name, dataset_type, model_name, augment_model, config, lora_save_dir, worker_id, num_workers)
 
     if stage in ('all', 'online'):
-        _federated_inference(root_dir, dataset_name, dataset_type, model_name, augment_model, config, lora_save_dir, eval_dir, k, silo_k, gold_only, num_silos, worker_id, num_workers)
+        _federated_inference(root_dir, dataset_name, dataset_type, model_name, augment_model, config, lora_save_dir, eval_dir, k, silo_k, num_silos, worker_id, num_workers)
 
     if stage == 'aggregate' or (stage == 'all' and num_workers == 1):
         _aggregate_shards(eval_dir)
@@ -58,19 +58,12 @@ def test_stage(root_dir, dataset_name, dataset_type, model_name, augment_model, 
 # Stage A: ensure every test passage has a doc-LoRA on disk
 # ------------------------------------------------------------------------------
 
-def _ensure_doc_loras(root_dir, dataset_name, dataset_type, model_name, augment_model, config, lora_save_dir, gold_only, worker_id, num_workers):
+def _ensure_doc_loras(root_dir, dataset_name, dataset_type, model_name, augment_model, config, lora_save_dir, worker_id, num_workers):
     max_entries = config.get('data', {}).get('max_entries', None)
     entries = load_aug_entries(root_dir, dataset_name, dataset_type, max_entries, mode='test')
-    if gold_only:
-        pairs = [(pid, doc) for pid, doc in iter_docs(entries, augment_model) if doc.label == 'gold']
-    else:
-        pairs = list(iter_docs(entries, augment_model))
+    pairs = list(iter_docs(entries, augment_model))
 
-    # Shard the FULL (deterministic) pair list — NOT a runtime-snapshot of "missing".
-    # The old code computed missing at each worker's startup; with N workers racing,
-    # the snapshot differed across workers, so shards overlapped/skipped some pids.
-    # Now: dedupe by pid + sort (stable across workers), shard, then per-item
-    # existence check (skip if some other worker already wrote it).
+    # Dedupe and sort before sharding so every worker receives a stable assignment.
     seen, unique = set(), []
     for pid, doc in pairs:
         if pid in seen: continue
@@ -81,7 +74,7 @@ def _ensure_doc_loras(root_dir, dataset_name, dataset_type, model_name, augment_
     if not my_assignment:
         return
 
-    model, tokenizer, _ = get_model(model_name)
+    model, tokenizer, _ = get_model(model_name, config)
     trained = 0
     for local_idx, (pid, doc) in enumerate(my_assignment):
         doc_id = make_doc_id(dataset_name, dataset_type, pid)
@@ -97,8 +90,8 @@ def _ensure_doc_loras(root_dir, dataset_name, dataset_type, model_name, augment_
 # Stage B: federated retrieval + LoRA merge + generate
 # ------------------------------------------------------------------------------
 
-def _federated_inference(root_dir, dataset_name, dataset_type, model_name, augment_model, config, lora_save_dir, eval_dir, k, silo_k, gold_only, num_silos, worker_id, num_workers):
-    # Per-silo retrieval k. None or unset -> use select-k (current default; back-compat with main sweeps).
+def _federated_inference(root_dir, dataset_name, dataset_type, model_name, augment_model, config, lora_save_dir, eval_dir, k, silo_k, num_silos, worker_id, num_workers):
+    # By default, each silo returns the same number of candidates as the global budget.
     if silo_k is None:
         silo_k = k
     print(f'[w{worker_id}/{num_workers}] per-silo retrieve k={silo_k}; server coverage-greedy select k={k}')
@@ -107,7 +100,7 @@ def _federated_inference(root_dir, dataset_name, dataset_type, model_name, augme
     pid_to_doc = {pid: doc for pid, doc in iter_docs(entries, augment_model)}
 
     silo_path = os.path.join(root_dir, f'dataset/test/{dataset_name}/{dataset_type}/silo.json')
-    assert os.path.isfile(silo_path), f'silo.json missing: {silo_path}. Run scripts/build_test_silo_splits.py first.'
+    assert os.path.isfile(silo_path), f'silo.json missing: {silo_path}. Prepare the dataset split before running inference.'
     silo_json = json.load(open(silo_path, 'r'))
     assert len(silo_json) == num_silos, f'silo.json has {len(silo_json)} silos but num_silos={num_silos}'
 
@@ -141,7 +134,7 @@ def _federated_inference(root_dir, dataset_name, dataset_type, model_name, augme
     gid_to_silo = {gid: s.id for s in silos for gid in s.doc_global_ids}
     gid_to_passage = {gid: doc.passage for s in silos for gid, doc in zip(s.doc_global_ids, s.docs)}
 
-    base_model, tokenizer, generation_config = get_model(model_name, device_map={'': 'cuda:0'})
+    base_model, tokenizer, generation_config = get_model(model_name, config, device_map={'': 'cuda:0'})
 
     ckpt_path = caa_cfg['train']['save_path'].replace('.pt', '_best.pt')
     if not os.path.exists(ckpt_path):
@@ -164,31 +157,18 @@ def _federated_inference(root_dir, dataset_name, dataset_type, model_name, augme
 
     shard_records = []
     for local_i, idx in enumerate(my_indices):
-        sample = entry_to_sample(entries[idx], augment_model, dataset_name, dataset_type)
+        sample = entry_to_sample(entries[idx])
         question = sample['question']
         print(f'\n[w{worker_id}] {local_i + 1}/{len(my_indices)} (idx={idx}, qid={sample["qid"]})')
 
-        if gold_only:
-            gold_idx = sample['gold_indices']
-            if not gold_idx:
-                shard_records.append({'idx': idx, 'qid': sample['qid'], 'pred': '', 'answer': sample['answer'], 'selected_doc_ids': [], 'silos': []})
-                continue
-            all_gold_gids = [sample['doc_ids'][i] for i in gold_idx]
-            selected_global_ids = [gid for gid in all_gold_gids if os.path.exists(os.path.join(lora_save_dir, gid))]
-            if not selected_global_ids:
-                shard_records.append({'idx': idx, 'qid': sample['qid'], 'pred': '', 'answer': sample['answer'], 'selected_doc_ids': [], 'silos': []})
-                continue
-        else:
-            q_emb = encoder.encode([question], max_length=caa_cfg.get('R_max_query_len', 32))[0]
-            pooled = []
-            for s in silos:
-                pooled.extend(s.retrieve_with_coverage(q_emb, k=silo_k))
-            print(f'  retrieved {len(pooled)} (silo, doc, coverage) candidates from {len(silos)} silos (silo_k={silo_k})')
-            min_gain = config.get('retrieval', {}).get('coverage_min_gain', None)
-            sel = coverage_greedy_select(pooled, k, min_gain=min_gain)
-            selected_global_ids = [gid for _, gid in sel]
-            if len(selected_global_ids) < k:
-                print(f'  early-stop: kept {len(selected_global_ids)}/{k} (min_gain={min_gain})')
+        q_emb = encoder.encode([question], max_length=caa_cfg.get('R_max_query_len', 32))[0]
+        pooled = []
+        for s in silos:
+            pooled.extend(s.retrieve_with_coverage(q_emb, k=silo_k))
+        print(f'  retrieved {len(pooled)} (silo, doc, coverage) candidates from {len(silos)} silos (silo_k={silo_k})')
+        min_gain = config.get('retrieval', {}).get('coverage_min_gain', None)
+        sel = coverage_greedy_select(pooled, k, min_gain=min_gain)
+        selected_global_ids = [gid for _, gid in sel]
 
         silo_origins = [gid_to_silo.get(gid, '?') for gid in selected_global_ids]
         lora_paths = [os.path.join(lora_save_dir, gid) for gid in selected_global_ids]

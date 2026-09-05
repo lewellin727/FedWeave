@@ -156,9 +156,7 @@ def load_scores(cache_dir, dataset, dataset_type, mode, qid):
 def _atomic_save_npy(final_path, arr):
     """Write arr to a tempfile in the same dir, then os.replace -> atomic on POSIX.
 
-    Concurrent writers either succeed or no-op; readers never see a partial file.
-    The previous non-atomic np.save let parallel DDP jobs catch each other
-    mid-write, surfacing as `EOFError: No data left in file` on load_scores/load_R.
+    Concurrent writers cannot expose partially written cache files to readers.
     """
     d = os.path.dirname(final_path)
     os.makedirs(d, exist_ok=True)

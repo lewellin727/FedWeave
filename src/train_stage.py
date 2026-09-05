@@ -18,12 +18,11 @@ from src.lora import train_lora
 from src.dataset import load_aug_entries, iter_docs, make_doc_id
 
 
-def train_stage(root_dir, datasets, model_name, augment_model, config, gold_only=False, worker_id=0, num_workers=1, stage='all', ranks_per_gpu=1):
+def train_stage(root_dir, datasets, model_name, augment_model, config, worker_id=0, num_workers=1, stage='all', ranks_per_gpu=1):
     """Run server CAA pre-training over the combined train pool.
 
     Args:
         datasets:        list of (dataset_name, dataset_type) tuples to combine.
-        gold_only:       if True, only train LoRAs for passages labeled 'gold' (debug).
         worker_id / num_workers: round-robin shard across parallel processes (offline only).
         stage:           'offline' | 'caa' | 'all'.
         ranks_per_gpu:   for CAA DDP; passed through to caa_train. Ignored in offline.
@@ -32,7 +31,7 @@ def train_stage(root_dir, datasets, model_name, augment_model, config, gold_only
     assert stage in ('all', 'offline', 'caa'), f'train_stage: stage must be in {{all, offline, caa}}, got {stage}'
 
     if stage in ('all', 'offline'):
-        _train_doc_loras(root_dir, datasets, model_name, augment_model, config, gold_only, worker_id, num_workers)
+        _train_doc_loras(root_dir, datasets, model_name, augment_model, config, worker_id, num_workers)
 
     if stage in ('all', 'caa'):
         # Under DDP we let caa_train run on every rank; otherwise gate to worker 0 only.
@@ -46,7 +45,7 @@ def train_stage(root_dir, datasets, model_name, augment_model, config, gold_only
 # Sub-stage A: per-doc LoRA training over the combined train pool
 # ------------------------------------------------------------------------------
 
-def _train_doc_loras(root_dir, datasets, model_name, augment_model, config, gold_only, worker_id, num_workers):
+def _train_doc_loras(root_dir, datasets, model_name, augment_model, config, worker_id, num_workers):
     """Train one LoRA per passage across all (dataset, type) combos in `datasets`.
 
     Idempotent: train_lora skips any doc_id whose adapter directory already exists,
@@ -60,10 +59,7 @@ def _train_doc_loras(root_dir, datasets, model_name, augment_model, config, gold
     print(f'[w{worker_id}/{num_workers}] offline: loading train aug entries from {len(datasets)} (dataset, type) pair(s) ...')
     for ds_name, ds_type in datasets:
         entries = load_aug_entries(root_dir, ds_name, ds_type, max_entries, mode='train')
-        if gold_only:
-            pairs = [(pid, doc) for pid, doc in iter_docs(entries, augment_model) if doc.label == 'gold']
-        else:
-            pairs = list(iter_docs(entries, augment_model))
+        pairs = list(iter_docs(entries, augment_model))
         print(f'  {ds_name}/{ds_type}: {len(entries)} entries -> {len(pairs)} passages')
         for pid, doc in pairs:
             flat.append((ds_name, ds_type, pid, doc))
@@ -73,7 +69,7 @@ def _train_doc_loras(root_dir, datasets, model_name, augment_model, config, gold
     if not my_assignment:
         return
 
-    model, tokenizer, _ = get_model(model_name)
+    model, tokenizer, _ = get_model(model_name, config)
     for local_idx, (ds_name, ds_type, pid, doc) in enumerate(my_assignment):
         doc_id = make_doc_id(ds_name, ds_type, pid)
         lora_save_dir = os.path.join(save_dir, f'{ds_name}/{ds_type}/{model_name}/train/le={lora_epoch}/doc_lora')

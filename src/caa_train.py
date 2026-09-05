@@ -190,7 +190,7 @@ def caa_train(combos, model_name, augment_model, config, num_epochs=3, lr=1e-4, 
     caa_config = config['caa']
 
     device_map = {"": f"cuda:{gpu_idx}"} if gpu_idx is not None else "auto"
-    base_model, tokenizer, _ = get_model(model_name, dtype=dtype, device_map=device_map)
+    base_model, tokenizer, _ = get_model(model_name, config, dtype=dtype, device_map=device_map)
     base_model.train()
     freeze_base_model(base_model)
     base_dtype = next(base_model.parameters()).dtype

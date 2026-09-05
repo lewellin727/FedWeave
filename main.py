@@ -52,9 +52,6 @@ if __name__ == "__main__":
     parser.add_argument("--num_silos", type=int, default=6, help='test mode: number of silos')
     parser.add_argument("--k", type=int, default=5, help='test mode: server-side coverage-greedy select-k (final docs to LM). Per-silo retrieval k defaults to this; override with --silo_k.')
     parser.add_argument("--silo_k", type=int, default=None, help='test mode: per-silo retrieval top-k (pool size = num_silos × silo_k before greedy select). Defaults to --k if not given.')
-    parser.add_argument("--gold_only", action='store_true',
-                        help='offline: only train gold-labeled LoRAs. '
-                             'online: skip retrieval/silos, use each question own gold docs directly.')
     parser.add_argument("--worker_id", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--max_entries", type=int, default=None,
@@ -64,7 +61,9 @@ if __name__ == "__main__":
     parser.add_argument("--caa_num_epochs", type=int, help='Override caa.train.num_epochs from config (training only).')
     parser.add_argument("--caa_save_path", type=str, help='Override caa.train.save_path from config (train: where to save; test: which ckpt to load).')
     parser.add_argument("--caa_eval_tag", type=str, default=None, help='Test mode: override the caa_subdir under test/le=.../ so each run writes to its own eval dir.')
-    parser.add_argument("--coverage_min_gain", type=float, default=None, help='Test mode: early-stop threshold on marginal coverage gain (cosine-sum over T_q query tokens). Overrides retrieval.coverage_min_gain. Always keeps ≥1 doc.')
+    parser.add_argument("--coverage_min_gain", type=float, default=None,
+                        help='Test mode: optional minimum marginal coverage gain for document selection. '
+                             'Overrides retrieval.coverage_min_gain.')
     parser.add_argument("--ranks_per_gpu", type=int, default=1,
                         help='CAA DDP: with torchrun --nproc_per_node=N and CUDA_VISIBLE_DEVICES set to M GPUs, ranks 0..N-1 map to visible GPU idx = LOCAL_RANK // ranks_per_gpu (so N = M * ranks_per_gpu).')
     args = parser.parse_args()
@@ -91,13 +90,13 @@ if __name__ == "__main__":
 
     if args.mode == 'train':
         from src.train_stage import train_stage
-        train_stage(curr_dir, datasets, args.model_name, args.augment_model, config, gold_only=args.gold_only, worker_id=args.worker_id, num_workers=args.num_workers, stage=args.stage, ranks_per_gpu=args.ranks_per_gpu)
+        train_stage(curr_dir, datasets, args.model_name, args.augment_model, config, worker_id=args.worker_id, num_workers=args.num_workers, stage=args.stage, ranks_per_gpu=args.ranks_per_gpu)
     elif args.mode == 'test':
         from src.test_stage import test_stage
         if args.stage == 'offline':
             for ds_name, ds_type in datasets:
-                test_stage(curr_dir, ds_name, ds_type, args.model_name, args.augment_model, config, k=args.k, silo_k=args.silo_k, gold_only=args.gold_only, num_silos=args.num_silos, worker_id=args.worker_id, num_workers=args.num_workers, stage=args.stage, caa_eval_tag=args.caa_eval_tag)
+                test_stage(curr_dir, ds_name, ds_type, args.model_name, args.augment_model, config, k=args.k, silo_k=args.silo_k, num_silos=args.num_silos, worker_id=args.worker_id, num_workers=args.num_workers, stage=args.stage, caa_eval_tag=args.caa_eval_tag)
         else:
             assert len(datasets) == 1, f'test mode online/aggregate requires exactly one dataset:type pair (got {len(datasets)}: {datasets})'
             ds_name, ds_type = datasets[0]
-            test_stage(curr_dir, ds_name, ds_type, args.model_name, args.augment_model, config, k=args.k, silo_k=args.silo_k, gold_only=args.gold_only, num_silos=args.num_silos, worker_id=args.worker_id, num_workers=args.num_workers, stage=args.stage, caa_eval_tag=args.caa_eval_tag)
+            test_stage(curr_dir, ds_name, ds_type, args.model_name, args.augment_model, config, k=args.k, silo_k=args.silo_k, num_silos=args.num_silos, worker_id=args.worker_id, num_workers=args.num_workers, stage=args.stage, caa_eval_tag=args.caa_eval_tag)

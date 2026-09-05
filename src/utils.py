@@ -1,8 +1,6 @@
-import os
 import re
 import json
 import torch
-import yaml
 import string
 import numpy as np
 from typing import List, Union
@@ -13,24 +11,22 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # ------------------------------------------ llm model ------------------------------------------
 
-MODEL_DIR = "/path/to/models"
-def get_model_path(model_name):
-    if model_name == "llama3-8b-instruct":
-        return f"{MODEL_DIR}/Meta-Llama-3-8B"
-    elif model_name == "qwen2.5-1.5b-instruct":
-        return f"{MODEL_DIR}/qwen2.5-1.5b-instruct"
-    elif model_name == "llama3.2-1b-instruct":
-        return f"{MODEL_DIR}/Llama-3.2-1B-Instruct"
-    else:
-        ValueError(f"{model_name} is not supported.")
+def get_model_path(model_name, config):
+    model_paths = config.get('backbone_paths', {})
+    if model_name not in model_paths:
+        raise ValueError(
+            f'No path configured for backbone {model_name!r}. '
+            f'Please add it under backbone_paths in config.yaml.'
+        )
+    return model_paths[model_name]
 
 
-def get_model(model_name, max_new_tokens=128, dtype=torch.float32, device_map="auto"):
+def get_model(model_name, config, max_new_tokens=128, dtype=torch.float32, device_map="auto"):
     """Load a model. `device_map='auto'` spreads across visible GPUs; pass
     `device_map={'': 'cuda:N'}` (or a string like `'cuda:0'`) to pin the whole
     model onto one GPU — required when DDP runs multiple ranks per node."""
     print(f'Loading {model_name} (dtype={dtype}, device_map={device_map})...')
-    model_path = get_model_path(model_name)
+    model_path = get_model_path(model_name, config)
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         dtype=dtype,
@@ -42,13 +38,11 @@ def get_model(model_name, max_new_tokens=128, dtype=torch.float32, device_map="a
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     generation_config = dict(
-        num_beams=1, 
+        num_beams=1,
         do_sample=False,
         max_new_tokens=max_new_tokens,
         return_dict_in_generate=True,
         pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0,
-        # temperature=0.9,
-        # top_p=0.8
     )
     return model, tokenizer, generation_config
 
@@ -58,13 +52,13 @@ def model_generate(prompt, model, tokenizer, generation_config):
         {'role': 'user', 'content': prompt}
     ]
     input_ids = tokenizer.apply_chat_template(
-        messages, 
+        messages,
         add_generation_prompt=True
     )
     input_len = len(input_ids)
     input_ids = torch.tensor(input_ids).unsqueeze(0).to(model.device)
     output = model.generate(
-        input_ids, 
+        input_ids,
         attention_mask = torch.ones(input_ids.shape).to(model.device),
         **generation_config
     )
@@ -83,7 +77,7 @@ You need to generate the question and answer in the following format:\n\
 [\n\
     {{\n\
         \"question\": \"What is the capital of France?\",\n\
-        \"answer\": \"Paris\"\n\
+        \"answer\": \"Paris\",\n\
         \"full_answer\": \"The capital of France is Paris.\"\n\
     }}, \n\
 ]\n\n\
@@ -118,12 +112,12 @@ def get_qa(passage, model_name, model=None, tokenizer=None, generation_config=No
                 output += "]"
         elif model_name == "llama3-8b-instruct":
             if "[" in output:
-                output = output[output.find("["):] 
+                output = output[output.find("["):]
             if "]" in output:
                 output = output[:output.find("]")+1]
         return output
 
-    TRY_TIMES = 30  
+    TRY_TIMES = 30
     try_times = TRY_TIMES
     prompt = QA_PROMPT.format(passage=passage)
     output = None
@@ -137,7 +131,7 @@ def get_qa(passage, model_name, model=None, tokenizer=None, generation_config=No
             if ret:
                 return qa
             try_times -= 1
-        except:
+        except (json.JSONDecodeError, TypeError):
             try_times -= 1
     return output
 
@@ -149,10 +143,10 @@ def _get_prompt(question, passages=None, answer=None):
         question = question.strip() + '?'
     elif question.endswith(' ?'):
         question = (question[:-1]).strip() + '?'
-     
+
     if passages and not isinstance(passages, list):
         passages = [passages]
-    
+
     if answer is None:
         answer = ""
     else:
@@ -181,7 +175,7 @@ def get_prompt(tokenizer, question, passages=None, answer=None):
     }]
 
     inputs = tokenizer.apply_chat_template(
-        messages, 
+        messages,
         add_generation_prompt=True)
     inputs += tokenizer.encode(assistant_content, add_special_tokens=False)
     return inputs
@@ -228,7 +222,7 @@ class BaseDataset:
         ground_truths = {ground_truth} if isinstance(ground_truth, str) else set(ground_truth)
         if ground_truth_id and isinstance(ground_truth_id, str):
             ground_truths.update(cls.get_all_alias(ground_truth_id))
-            
+
         final_metric = {'f1': 0, 'precision': 0, 'recall': 0}
         for ground_truth in ground_truths:
             normalized_prediction = cls.normalize_answer(prediction)
@@ -271,7 +265,7 @@ def evaluate(pred, ground_truth, with_cot=False):
         for stop in stop_list:
             end_pos = pred.find(stop)
             if end_pos != -1:
-                pred = pred[:end_pos].strip() 
+                pred = pred[:end_pos].strip()
 
     em = BaseDataset.exact_match_score(
         prediction=pred,
@@ -305,45 +299,3 @@ def shard_indices(n, worker_id, num_workers):
     """Round-robin shard of range(n)."""
     assert 0 <= worker_id < num_workers, f'invalid sharding: w{worker_id}/{num_workers}'
     return [i for i in range(n) if i % num_workers == worker_id]
-
-
-# --------------------------------------- communication ----------------------------------------
-import os
-import sys
-def get_size(obj_or_path):
-    if isinstance(obj_or_path, str) and os.path.exists(obj_or_path):
-        if os.path.isdir(obj_or_path):
-            total_size = 0
-            for dirpath, dirnames, filenames in os.walk(obj_or_path):
-                for f in filenames:
-                    fp = os.path.join(dirpath, f)
-                    if os.path.isfile(fp):
-                        total_size += os.path.getsize(fp)
-            size_b = total_size
-        elif os.path.isfile(obj_or_path):
-            size_b = os.path.getsize(obj_or_path)
-        else:
-            size_b = sys.getsizeof(obj_or_path)
-    
-    else:
-        seen_ids = set()
-        def inner_size(o):
-            obj_id = id(o)
-            if obj_id in seen_ids:
-                return 0
-            seen_ids.add(obj_id)
-
-            size = sys.getsizeof(o)
-
-            if isinstance(o, dict):
-                size += sum(inner_size(k) + inner_size(v) for k, v in o.items())
-            elif hasattr(o, '__dict__'):
-                size += inner_size(vars(o))
-            elif hasattr(o, '__iter__') and not isinstance(o, (str, bytes, bytearray)):
-                size += sum(inner_size(i) for i in o)
-            return size
-
-        size_b = inner_size(obj_or_path)
-
-    size_mb = size_b / (1024 * 1024)
-    return size_mb

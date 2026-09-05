@@ -41,7 +41,6 @@ class CAAModule(nn.Module):
         L_caa: list of layer indices to mount CAA on.
         d_a: per-layer cross-attention internal dim. 64 by default.
         alpha: scalar multiplier on the cross-attn residual contribution.
-               Tuned per-deployment; see docs/EXPERIMENT_LOG.md.
     """
 
     def __init__(self, hidden_size, intermediate_size, L_caa, d_a=64, alpha=0.1):
@@ -120,13 +119,6 @@ class CAAMLP(nn.Module):
         d_a = self.caa_module.d_a
         alpha = self.caa_module.alpha
 
-        # Ablation toggles (env-var, read each forward call so they can be set after model load)
-        import os as _os
-        NO_CROSS  = _os.environ.get('CAA_NO_CROSS',  '0') == '1'
-        NO_ROUTER = _os.environ.get('CAA_NO_ROUTER', '0') == '1'
-        NO_R      = _os.environ.get('CAA_NO_R',      '0') == '1'
-        NO_C      = _os.environ.get('CAA_NO_C',      '0') == '1'
-
         # === Base SwiGLU components ===
         base_gate = self.base_mlp.gate_proj(x)
         base_up = self.base_mlp.up_proj(x)
@@ -143,33 +135,24 @@ class CAAMLP(nn.Module):
         H1_fp32 = H1.float()
 
         # === Step 2-3: Cross-Adapter Attention + residual ===
-        if NO_CROSS:
-            H_tilde = H1
-        else:
-            Q = params['W_Q_cross'](H1_fp32)
-            K = params['W_K_cross'](H1_fp32)
-            V = params['W_V_cross'](H1_fp32)
-            scores = (Q @ K.transpose(-1, -2)) / math.sqrt(d_a)
-            if not NO_R:
-                log_R = torch.log(R.clamp(min=1e-8)).to(scores.dtype).to(scores.device)
-                scores = scores + log_R
-            beta = F.softmax(scores, dim=-1)
-            attn_out = beta @ V
-            attn_proj_dm = params['W_O_cross'](attn_out)
-            H_tilde = H1 + (alpha * attn_proj_dm).to(H1.dtype)
+        Q = params['W_Q_cross'](H1_fp32)
+        K = params['W_K_cross'](H1_fp32)
+        V = params['W_V_cross'](H1_fp32)
+        scores = (Q @ K.transpose(-1, -2)) / math.sqrt(d_a)
+        log_R = torch.log(R.clamp(min=1e-8)).to(scores.dtype).to(scores.device)
+        scores = scores + log_R
+        beta = F.softmax(scores, dim=-1)
+        attn_out = beta @ V
+        attn_proj_dm = params['W_O_cross'](attn_out)
+        H_tilde = H1 + (alpha * attn_proj_dm).to(H1.dtype)
 
         # === Step 4: Token-level router with log_softmax(scores) bias ===
-        if NO_ROUTER:
-            b_, s_ = H1.shape[0], H1.shape[1]
-            router_alpha = torch.full((b_, s_, N), 1.0 / N, dtype=H1.dtype, device=H1.device)
-        else:
-            q_router_fp32 = params['W_Q_route'](x.float())
-            k_router_fp32 = params['W_K_route'](H1_fp32)
-            alpha_logits = (q_router_fp32.unsqueeze(-2) * k_router_fp32).sum(-1) / math.sqrt(d_a)
-            if not NO_C:
-                log_prior = F.log_softmax(self.caa_module._scores.float().to(alpha_logits.device), dim=-1)
-                alpha_logits = alpha_logits + log_prior.view(1, 1, -1).to(alpha_logits.dtype)
-            router_alpha = F.softmax(alpha_logits, dim=-1).to(H1.dtype)
+        q_router_fp32 = params['W_Q_route'](x.float())
+        k_router_fp32 = params['W_K_route'](H1_fp32)
+        alpha_logits = (q_router_fp32.unsqueeze(-2) * k_router_fp32).sum(-1) / math.sqrt(d_a)
+        log_prior = F.log_softmax(self.caa_module._scores.float().to(alpha_logits.device), dim=-1)
+        alpha_logits = alpha_logits + log_prior.view(1, 1, -1).to(alpha_logits.dtype)
+        router_alpha = F.softmax(alpha_logits, dim=-1).to(H1.dtype)
 
         # === Step 5: SwiGLU integration ===
         h_lora_up = (router_alpha.unsqueeze(-1) * H_tilde).sum(dim=-2)

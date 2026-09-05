@@ -1,74 +1,155 @@
 # FedWeave: Federated Parametric RAG for Multi-Evidence Reasoning
 
-Reference implementation of *FedWeave* — a federated parametric RAG framework
-for queries whose answers depend on complementary evidence scattered across
-silos, while raw documents stay local. Both retrieval and generation share a
-single signal: **evidence coverage**.
+This repository contains the official implementation of our paper:
 
-- **Coverage-aware retrieval (paper §IV).** Each silo summarizes how each
-  candidate document supports each query token as a query-conditioned
-  *coverage vector* (ColBERT late-interaction). Only the vectors + doc IDs
-  leave the silo; the coordinator then runs a greedy submodular selection that
-  maximizes set-level coverage — within (1 − 1/e) of optimal.
-- **Cross-Adapter Collaborative Generation (paper §V).** Selected document
-  LoRA adapters are kept separate in activation space at the coordinator. A
-  **Cross-Adapter Attention (CAA)** module reuses the coverage vectors as a
-  complementarity prior, lets adapters exchange information, then aggregates
-  them into the frozen backbone LLM.
+> **FedWeave: Federated Parametric RAG for Multi-Evidence Reasoning**
+>
+> *Accepted at the IEEE International Conference on Data Mining (ICDM 2026).*
 
-## Setup
+## Overview
 
-```bash
-pip install -r requirements.txt           # Python 3.10+
-# then edit config.yaml: backbone LLM, ColBERTv2, dataset root
+FedWeave is a federated parametric retrieval-augmented generation framework
+for questions that require complementary evidence distributed across data
+silos. Raw documents remain inside their original silos throughout retrieval
+and generation.
+
+FedWeave uses evidence coverage as a shared signal across two components:
+
+- **Coverage-Aware Federated Retrieval.** Each silo computes query-conditioned
+  coverage vectors for its local candidates. The coordinator receives only
+  document identifiers and coverage vectors, then greedily selects a document
+  set that covers complementary query facets.
+- **Cross-Adapter Collaborative Generation.** Each selected document is
+  represented by a lightweight LoRA adapter. Cross-Adapter Attention (CAA)
+  uses coverage-derived priors to exchange information among selected adapters
+  before their activations are aggregated into the frozen backbone LLM.
+
+<p align="center">
+  <img src="figures/overview.png" alt="FedWeave architecture overview" width="95%">
+  <br>
+  <em>Overview of FedWeave</em>
+</p>
+
+## Repository Structure
+
+```text
+FedWeave/
+├── main.py                 # Command-line entry point
+├── config.yaml            # Model paths and hyperparameters
+├── requirements.txt       # Python dependencies
+├── figures/
+│   └── overview.png       # Framework overview
+├── scripts/
+│   └── main_experiments/ # Training and dataset-specific evaluation
+└── src/
+    ├── caa.py             # Cross-Adapter Attention
+    ├── caa_train.py       # CAA training
+    ├── dataset.py         # Processed-data loading and sampling
+    ├── inference.py       # CAA-based generation
+    ├── lora.py            # Per-document LoRA training and loading
+    ├── r_matrix.py        # Coverage-derived priors
+    ├── silo.py            # Federated retrieval and set selection
+    ├── test_stage.py      # Evaluation pipeline
+    ├── train_stage.py     # Offline training pipeline
+    └── utils.py           # Model, prompt, and evaluation utilities
 ```
 
-## Quick start
+## Installation
 
-`main.py` is the single entry point. The pipeline has an offline phase
-(per-doc LoRAs + CAA training) and an online phase (federated retrieval +
-collaborative generation).
+We recommend Python 3.10 and a CUDA-enabled PyTorch environment.
 
 ```bash
-# Offline 1: per-document LoRA adapters (once per dataset/type)
-python main.py --mode test --stage offline \
-    --datasets hotpotqa:bridge --num_silos 6
+git clone https://github.com/lewellin727/FedWeave.git
+cd FedWeave
 
-# Offline 2: train the CAA module at the coordinator
-python main.py --mode train --stage caa \
-    --datasets hotpotqa:bridge,hotpotqa:comparison,2wikimultihopqa:comparison \
-    --caa_save_path /path/to/caa.pt
-
-# Online: federated retrieval + collaborative generation
-python main.py --mode test --stage all \
-    --datasets 2wikimultihopqa:comparison \
-    --num_silos 6 --k 5 \
-    --caa_save_path /path/to/caa.pt --caa_alpha 0.05
+conda create -n fedweave python=3.10
+conda activate fedweave
+pip install -r requirements.txt
 ```
 
-Useful flags: `--silo_k` (per-silo top-k, defaults to `--k`),
-`--coverage_min_gain` (greedy early-stop threshold τ),
-`--caa_eval_tag` (eval subdir).
+## Configuration
 
-## Datasets
+Before running FedWeave, edit [`config.yaml`](config.yaml) to match your local
+environment.
 
-Four open-domain QA benchmarks: **HotpotQA** (bridge, comparison),
-**2WikiMultihopQA** (bridge_comparison, comparison, inference, compositional),
-**ComplexWebQuestions**, **PopQA**. Each is partitioned into 6 silos under a
-Dirichlet allocation (α = 0.1); default retrieval `k = 5`.
-
-## Code organization
-
-The `src/` files map to the paper as follows:
-
-| Paper section | Files |
+| Field | Description |
 |---|---|
-| §III workflow (Algorithm 1) | [main.py](main.py), [src/test_stage.py](src/test_stage.py), [src/train_stage.py](src/train_stage.py) |
-| §IV Coverage-aware retrieval | [src/r_matrix.py](src/r_matrix.py) (coverage vector, Eq. 3) · [src/silo.py](src/silo.py) (local search + greedy selection, Eq. 5) |
-| §V Cross-adapter generation | [src/caa.py](src/caa.py) (CAA, Eq. 6–13 + Alg. 2) · [src/caa_train.py](src/caa_train.py) (training, Eq. 14) · [src/inference.py](src/inference.py) (online generation) |
-| Doc-LoRA training (Eq. 1) | [src/lora.py](src/lora.py), [src/train_stage.py](src/train_stage.py) |
-| Data + prompts | [src/dataset.py](src/dataset.py), [src/utils.py](src/utils.py) |
+| `backbone_paths.llama3.2-1b-instruct` | Local path to the LLaMA-3.2-1B-Instruct checkpoint. |
+| `train.save_dir` | Root directory for document LoRAs, CAA checkpoints, predictions, and metrics. |
+| `train.training_output_dir` | Temporary output directory used during LoRA training. |
+| `caa.colbert_path` | Local path to the ColBERTv2 checkpoint. |
+| `caa.R_cache_dir` | Directory for cached complementarity matrices and document scores. |
 
-## Citation
+The released configuration uses LLaMA-3.2-1B-Instruct as the backbone and
+ColBERTv2 for late-interaction retrieval.
 
-Anonymous submission; citation will be added after acceptance.
+## Dataset and Checkpoints
+
+FedWeave is evaluated on four open-domain QA benchmarks:
+
+| Dataset | Types used in the experiments |
+|---|---|
+| HotpotQA | `bridge`, `comparison` |
+| 2WikiMultihopQA | `bridge_comparison`, `comparison`, `inference`, `compositional` |
+| ComplexWebQuestions | `total` |
+| PopQA | `total` |
+
+The processed datasets and trained model parameters used in our experiments
+are available from the
+[FedWeave repository on Hugging Face](https://huggingface.co/lewellin727/FedWeave).
+No dataset preparation step is required.
+
+## Running FedWeave
+
+The scripts in `scripts/main_experiments/` contain the settings used for each
+dataset. They read the output directory from `config.yaml`, select the
+appropriate CAA checkpoint and hyperparameters, and invoke `main.py`.
+
+### Train document LoRAs and CAA
+
+Run the training pipeline once:
+
+```bash
+bash scripts/main_experiments/train.sh
+```
+
+The script first trains the document LoRAs required by CAA, then trains the CAA
+checkpoints used by the evaluation scripts. Existing document LoRAs and CAA
+checkpoints are skipped, so interrupted runs can be resumed.
+
+### Run individual datasets
+
+Each dataset has a dedicated script:
+
+```bash
+bash scripts/main_experiments/run_hotpotqa.sh
+bash scripts/main_experiments/run_2wikimultihopqa.sh
+bash scripts/main_experiments/run_complexwebquestions.sh
+bash scripts/main_experiments/run_popqa.sh
+```
+
+Each script trains any missing test document LoRAs and then runs federated
+retrieval, CAA generation, and metric aggregation for all supported question
+types in that dataset.
+
+### Run all datasets
+
+After training completes, all four datasets can be evaluated with:
+
+```bash
+bash scripts/main_experiments/run_all.sh
+```
+
+Predictions and metrics are written under:
+
+```text
+<train.save_dir>/<dataset>/<type>/<model>/test/le=<epochs>/caa/silo_K=<N>_k=<k>/
+├── result.json
+└── eval.json
+```
+
+## Acknowledgements
+
+FedWeave builds on LLaMA, ColBERTv2, Hugging Face Transformers, PEFT, and TRL.
+We thank the authors of these projects and the creators of HotpotQA,
+2WikiMultihopQA, ComplexWebQuestions, and PopQA for releasing their work.

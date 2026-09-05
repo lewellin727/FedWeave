@@ -1,5 +1,8 @@
+backbone_paths:
+  llama3.2-1b-instruct: '/path/to/models/llama-3.2-1B-Instruct'
+
 data:
-  max_entries: null                        # debug knob: truncate dataset/{mode}/{ds}/{type}/aug.json to first N entries. null = use all.
+  max_entries: null
 
 prep_dataset:
   retrieve:
@@ -29,14 +32,13 @@ train:
   training_output_dir: '/path/to/fedweave_output/training_output'
 
 retrieval:
-  # Absolute threshold on marginal coverage gain (cosine-sum over T_q query tokens)
-  # for the coverage-greedy server selection. If the next pick's gain < this, stop
-  # (always keeps ≥1 doc). null = off (always pick k docs).
+  # Stop when the next document contributes less than this marginal coverage.
+  # Set to null to always select exactly k documents.
   coverage_min_gain: null
 
 caa:
-  d_a: 64                                  # cross-attention internal dim (per-layer projections)
-  alpha: 0.1                               # scalar multiplier on the cross-attn residual: y = base + alpha * cross_attn_out. Tune per deployment; see docs/EXPERIMENT_LOG.md.
+  d_a: 64
+  alpha: 0.1
   L_caa: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
   colbert_path: '/path/to/models/colbertv2.0'
   R_cache_dir: '/path/to/fedweave_output/caa/R_cache'
@@ -50,7 +52,7 @@ caa:
     log_every: 10
     val_every: 50
     val_ratio: 0.1
-    k_per_combo: 500                       # questions per (dataset, type); 6 combos * 500 = 3000 samples
+    k_per_combo: 500
     seed: 42
     dtype: 'bf16'
-    save_path: '/path/to/fedweave_output/caa/v6/caa.pt'
+    save_path: '/path/to/caa.pt'

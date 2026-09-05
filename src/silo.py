@@ -83,9 +83,7 @@ class ColBertSilo:
         self.max_doc_len = max_doc_len
         os.makedirs(cache_dir, exist_ok=True)
         embs = self._load_or_encode_embeddings()  # list of (T_d_i, 128) tensors
-        # Vectorize: pad to (N, T_d_max, 128) so MaxSim retrieval becomes ONE batch
-        # matmul instead of a Python for-loop over N docs (which dominated CPU before
-        # — see issue diagnosed during 5-cell parallel sweep).
+        # Pad to (N, T_d_max, 128) so MaxSim retrieval uses one batched matmul.
         N = len(embs)
         T_d_max = max((e.shape[0] for e in embs), default=1)
         self.doc_embs_padded = torch.zeros(N, T_d_max, 128, dtype=torch.float32)
@@ -134,9 +132,6 @@ class ColBertSilo:
         return [(self.id, self.doc_global_ids[i.item()], covs[i.item()]) for i in top.indices]
 
 
-MIN_KEEP_DOCS = 1  # server-side hard floor: never return fewer than this many docs (unless pool < MIN_KEEP_DOCS)
-
-
 def coverage_greedy_select(candidates, k, min_gain=None):
     """Greedy selection on monotone submodular coverage utility U(S) = Σ_i max_d C_d[i].
 
@@ -150,11 +145,8 @@ def coverage_greedy_select(candidates, k, min_gain=None):
         candidates: list of (silo_id, doc_id, coverage_vector) tuples (output of
                     ColBertSilo.retrieve_with_coverage pooled across silos).
         k: max number to select (hard cap).
-        min_gain: optional float threshold on marginal coverage gain (sum over T_q
-                  query tokens of ColBERT cosine, so units are "cosine-sum"). If the
-                  next pick's gain is < min_gain, return early with fewer than k docs.
-                  Floor is MIN_KEEP_DOCS — early-stop is only honored after that many
-                  picks. So output size ∈ [min(MIN_KEEP_DOCS, len(candidates)), min(k, len(candidates))].
+        min_gain: optional minimum marginal coverage gain. The first document is
+                  always selected when candidates are available.
     Returns:
         List of (silo_id, doc_id) in order of selection.
     """
@@ -170,7 +162,7 @@ def coverage_greedy_select(candidates, k, min_gain=None):
             gain = float((new_running - running).sum())
             if gain > best_gain:
                 best_gain, best_j = gain, j
-        if step >= MIN_KEEP_DOCS and min_gain is not None and best_gain < min_gain:
+        if step > 0 and min_gain is not None and best_gain < min_gain:
             break
         chosen.append(best_j)
         remaining.remove(best_j)

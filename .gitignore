@@ -1,17 +1,19 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# User-requested exclusions (paper-prep workdirs not part of the public release)
+# Project data, outputs, and local development files
 # ──────────────────────────────────────────────────────────────────────────────
 .claude/
 .vscode/
 baselines/
 dataset/
 docs/
-figures/
+figures/*
+!figures/overview.png
 logs/
 micro_benchmark/
 motivation/
 output/
-scripts/
+scripts/*
+!scripts/main_experiments/
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Python
