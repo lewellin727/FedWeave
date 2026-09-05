@@ -8,21 +8,16 @@ This repository contains the official implementation of our paper:
 
 ## Overview
 
-FedWeave is a federated parametric retrieval-augmented generation framework
-for questions that require complementary evidence distributed across data
-silos. Raw documents remain inside their original silos throughout retrieval
-and generation.
-
-FedWeave uses evidence coverage as a shared signal across two components:
+FedWeave is a federated parametric RAG framework for multi-evidence reasoning
+over siloed data while keeping raw documents local. It coordinates retrieval
+and generation through evidence coverage:
 
 - **Coverage-Aware Federated Retrieval.** Each silo computes query-conditioned
-  coverage vectors for its local candidates. The coordinator receives only
-  document identifiers and coverage vectors, then greedily selects a document
-  set that covers complementary query facets.
-- **Cross-Adapter Collaborative Generation.** Each selected document is
-  represented by a lightweight LoRA adapter. Cross-Adapter Attention (CAA)
-  uses coverage-derived priors to exchange information among selected adapters
-  before their activations are aggregated into the frozen backbone LLM.
+  coverage vectors, enabling the coordinator to select complementary documents
+  without accessing their contents.
+- **Cross-Adapter Collaborative Generation.** Cross-Adapter Attention (CAA)
+  uses the same coverage signal to coordinate selected document LoRAs before
+  aggregating them into the frozen backbone LLM.
 
 <p align="center">
   <img src="figures/overview.png" alt="FedWeave architecture overview" width="95%">
@@ -96,7 +91,7 @@ FedWeave is evaluated on four open-domain QA benchmarks:
 
 The processed datasets and trained model parameters used in our experiments
 are available from the
-[FedWeave repository on Hugging Face](https://huggingface.co/lewellin727/FedWeave).
+[FedWeave repository on Hugging Face](https://huggingface.co/datasets/lewellin727/FedWeave/tree/main).
 No dataset preparation step is required.
 
 ## Running FedWeave
